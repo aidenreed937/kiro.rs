@@ -3333,6 +3333,16 @@ impl MultiTokenManager {
             };
         }
 
+        if let Err(wait) = self.rate_limiter.check_rate_limit(entry.id) {
+            return CredentialHealth::new(
+                CredentialHealthStatus::RateLimited,
+                "local_rpm_limited",
+                "本地 RPM/请求间隔限制中",
+                true,
+                Some((wait.as_millis().div_ceil(1000) as u64).max(1)),
+            );
+        }
+
         if entry.refresh_failure_count > 0 {
             return CredentialHealth::new(
                 CredentialHealthStatus::TokenRefreshFailed,
@@ -4827,6 +4837,25 @@ mod tests {
         let retry_after_secs = snapshot.entries[0].health.retry_after_secs.unwrap();
         assert!(retry_after_secs <= 120);
         assert!(retry_after_secs > 100);
+    }
+
+    #[test]
+    fn test_snapshot_health_reports_local_rpm_limit() {
+        let mut config = Config::default();
+        config.credential_rpm = Some(60);
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        manager.rate_limiter().try_acquire(1).unwrap();
+
+        let snapshot = manager.snapshot();
+        assert_eq!(
+            snapshot.entries[0].health.status,
+            CredentialHealthStatus::RateLimited
+        );
+        assert_eq!(snapshot.entries[0].health.reason, "local_rpm_limited");
+        assert!(snapshot.entries[0].health.retry_after_secs.is_some());
     }
 
     #[test]
