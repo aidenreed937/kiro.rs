@@ -56,7 +56,7 @@ impl CooldownReason {
             CooldownReason::RateLimitExceeded => true,
             CooldownReason::TokenRefreshFailed => true,
             CooldownReason::ServerError => true,
-            CooldownReason::ModelUnavailable => true,
+            CooldownReason::ModelUnavailable => false,
             CooldownReason::AuthenticationFailed => false,
             CooldownReason::AccountSuspended => false,
             CooldownReason::QuotaExhausted => false,
@@ -339,6 +339,7 @@ mod tests {
     fn test_cooldown_reason_auto_recoverable() {
         assert!(CooldownReason::RateLimitExceeded.is_auto_recoverable());
         assert!(CooldownReason::ServerError.is_auto_recoverable());
+        assert!(!CooldownReason::ModelUnavailable.is_auto_recoverable());
         assert!(!CooldownReason::AccountSuspended.is_auto_recoverable());
         assert!(!CooldownReason::QuotaExhausted.is_auto_recoverable());
     }

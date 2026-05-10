@@ -1268,6 +1268,13 @@ fn is_admin_recoverable_without_smoke(
     entry.failure_count > 0 || entry.refresh_failure_count > 0
 }
 
+fn is_disable_reason_automatic_recoverable(reason: DisableReason) -> bool {
+    matches!(
+        reason,
+        DisableReason::FailureLimit | DisableReason::RefreshFailureLimit
+    )
+}
+
 /// API 调用上下文
 ///
 /// 绑定特定凭据的调用上下文，确保 token、credentials 和 id 的一致性
@@ -2143,7 +2150,6 @@ impl MultiTokenManager {
                         CooldownReason::RateLimitExceeded
                             | CooldownReason::TokenRefreshFailed
                             | CooldownReason::ServerError
-                            | CooldownReason::ModelUnavailable
                     );
                     tracing::debug!(
                         user_id = %user_id,
@@ -2469,14 +2475,25 @@ impl MultiTokenManager {
 
                                 let (has_available, recorded_failure) = {
                                     let mut entries = self.entries.lock();
-                                    let recorded_failure = if let Some(entry) =
-                                        entries.iter_mut().find(|e| e.id == id)
-                                    {
-                                        entry.record_refresh_failure(Some(&err.to_string()));
+                                    let mut should_cooldown = false;
+                                    let recorded_failure = if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                                        let count = entry.record_refresh_failure(Some(&err.to_string()));
+                                        should_cooldown =
+                                            count < MAX_FAILURES_PER_CREDENTIAL && !entry.disabled;
                                         true
                                     } else {
                                         false
                                     };
+                                    drop(entries);
+                                    if should_cooldown {
+                                        self.set_credential_cooldown_with_duration_and_message(
+                                            id,
+                                            CooldownReason::TokenRefreshFailed,
+                                            None,
+                                            Some(&err.to_string()),
+                                        );
+                                    }
+                                    let entries = self.entries.lock();
                                     (
                                         entries.iter().any(|e| !e.disabled && e.id != id),
                                         recorded_failure,
@@ -2873,7 +2890,7 @@ impl MultiTokenManager {
 
     /// 报告 MODEL_TEMPORARILY_UNAVAILABLE 错误
     ///
-    /// 累计达到阈值后禁用所有凭据，5分钟后自动恢复
+    /// 累计达到阈值后禁用所有凭据；需要人工确认或发消息验活后恢复。
     /// 返回是否触发了全局禁用
     pub fn report_model_unavailable(&self) -> bool {
         let count = self.model_unavailable_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2895,7 +2912,6 @@ impl MultiTokenManager {
     fn disable_all_credentials(&self, reason: DisableReason) {
         let changed = {
             let mut entries = self.entries.lock();
-            let mut recovery_time = self.global_recovery_time.lock();
             let mut changed = false;
 
             for entry in entries.iter_mut() {
@@ -2910,26 +2926,33 @@ impl MultiTokenManager {
                 }
             }
 
-            // 设置恢复时间
-            let recover_at = Utc::now() + Duration::minutes(GLOBAL_DISABLE_RECOVERY_MINUTES);
-            *recovery_time = Some(recover_at);
-
-            tracing::error!(
-                "所有凭据已被禁用（原因: {:?}），将于 {} 自动恢复",
-                reason,
-                recover_at.format("%H:%M:%S")
-            );
-
             changed
         };
         if changed {
             self.save_stats_debounced();
         }
+
+        if is_disable_reason_automatic_recoverable(reason) {
+            let mut recovery_time = self.global_recovery_time.lock();
+            let recover_at = Utc::now() + Duration::minutes(GLOBAL_DISABLE_RECOVERY_MINUTES);
+            *recovery_time = Some(recover_at);
+            tracing::error!(
+                "所有凭据已被禁用（原因: {:?}），将于 {} 自动恢复",
+                reason,
+                recover_at.format("%H:%M:%S")
+            );
+        } else {
+            *self.global_recovery_time.lock() = None;
+            tracing::error!(
+                "所有凭据已被禁用（原因: {:?}），需要手动处理或验活恢复",
+                reason
+            );
+        }
     }
 
     /// 检查并执行自动恢复
     ///
-    /// 如果已到恢复时间，恢复因 ModelUnavailable 禁用的凭据
+    /// 如果已到恢复时间，恢复明确允许自动恢复的凭据
     /// 余额不足的凭据不会被恢复
     ///
     /// 返回是否执行了恢复
@@ -2949,8 +2972,11 @@ impl MultiTokenManager {
             let mut recovered_count = 0;
 
             for entry in entries.iter_mut() {
-                // 只恢复因 ModelUnavailable 禁用的凭据，余额不足的不恢复
-                if entry.disabled && entry.disable_reason == Some(DisableReason::ModelUnavailable) {
+                if entry.disabled
+                    && entry
+                        .disable_reason
+                        .is_some_and(is_disable_reason_automatic_recoverable)
+                {
                     entry.transition(CredentialStateTransition::AutoRecover);
                     recovered_count += 1;
                 }
@@ -3224,8 +3250,8 @@ impl MultiTokenManager {
                 Some(DisableReason::ModelUnavailable) => CredentialHealth::new(
                     CredentialHealthStatus::ModelUnavailable,
                     "model_unavailable",
-                    "模型暂时不可用，等待自动恢复",
-                    true,
+                    "模型暂时不可用，需要验活后恢复",
+                    false,
                     None,
                 ),
                 Some(DisableReason::RefreshFailureLimit) => CredentialHealth::new(
@@ -3294,7 +3320,7 @@ impl MultiTokenManager {
                     CredentialHealthStatus::ModelUnavailable,
                     "model_unavailable",
                     "模型暂时不可用冷却中",
-                    true,
+                    false,
                     retry_after_secs,
                 ),
                 CooldownReason::ServerError => CredentialHealth::new(
@@ -4619,6 +4645,23 @@ mod tests {
             "错误应提示所有凭据禁用，实际: {}",
             err
         );
+        assert_eq!(manager.available_count(), 0);
+    }
+
+    #[test]
+    fn test_model_unavailable_disabled_is_not_timer_recovered() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(!manager.report_model_unavailable());
+        assert!(manager.report_model_unavailable());
+        assert_eq!(manager.available_count(), 0);
+        assert!(manager.get_recovery_time().is_none());
+        assert!(!manager.check_and_recover());
         assert_eq!(manager.available_count(), 0);
     }
 

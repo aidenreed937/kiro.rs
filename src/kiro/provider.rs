@@ -441,6 +441,8 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let error_summary = format!("MCP 请求发送失败: {}", e);
+                    self.handle_transient_upstream_error(ctx.id, &error_summary);
                     tracing::warn!(
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -620,6 +622,12 @@ impl KiroProvider {
                     );
                 }
 
+                let error_summary = format!(
+                    "MCP 请求瞬态失败: {} {}",
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                self.handle_transient_upstream_error(ctx.id, &error_summary);
                 last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
                 if attempt + 1 < max_retries {
                     sleep(Self::retry_delay(attempt)).await;
@@ -730,6 +738,8 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let error_summary = format!("API 请求发送失败: {}", e);
+                    self.handle_transient_upstream_error(ctx.id, &error_summary);
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
@@ -992,6 +1002,13 @@ impl KiroProvider {
                     );
                 }
 
+                let error_summary = format!(
+                    "{} API 请求瞬态失败: {} {}",
+                    api_type,
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                self.handle_transient_upstream_error(ctx.id, &error_summary);
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -1074,6 +1091,25 @@ impl KiroProvider {
             cooldown_secs = %cooldown.as_secs(),
             rate_limit_response = %Self::is_rate_limit_response(body),
             "凭据触发 429 限流，已设置冷却"
+        );
+
+        cooldown
+    }
+
+    fn handle_transient_upstream_error(&self, credential_id: u64, summary: &str) -> Duration {
+        let cooldown = self
+            .token_manager
+            .set_credential_cooldown_with_duration_and_message(
+                credential_id,
+                crate::kiro::cooldown::CooldownReason::ServerError,
+                None,
+                Some(summary),
+            );
+
+        tracing::warn!(
+            credential_id = %credential_id,
+            cooldown_secs = %cooldown.as_secs(),
+            "凭据触发上游瞬态错误，已设置短冷却"
         );
 
         cooldown
