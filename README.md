@@ -387,6 +387,16 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 兼容的 fallback 顺序：`x-kiro-session-id` → `x-session-id` → `metadata.user_id`。
 
+示例：
+
+```bash
+curl http://127.0.0.1:8990/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-kiro-rs-qazWSXedcRFV123456" \
+  -H "x-kiro-session-id: user-123-session-a" \
+  -d '{"model":"claude-sonnet-4-20250514","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}'
+```
+
 ### Thinking 模式
 
 支持 Claude 的 extended thinking 功能：
@@ -452,10 +462,35 @@ RUST_LOG=debug ./target/release/kiro-rs
   - `POST /api/admin/credentials/:id/priority` - 设置凭据优先级
   - `POST /api/admin/credentials/:id/region` - 设置凭据 Region
   - `POST /api/admin/credentials/:id/reset` - 重置失败计数
+  - `POST /api/admin/credentials/:id/smoke-check` - 发送最小消息验活
+  - `POST /api/admin/credentials/:id/cooldown/clear` - 清除凭据冷却
+  - `POST /api/admin/credentials/:id/recover` - 恢复可恢复状态；高风险状态需请求体 `{"smokeCheck":true}`
   - `GET /api/admin/credentials/:id/balance` - 获取凭据余额
 
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
+
+### 凭据健康状态与恢复
+
+`GET /api/admin/credentials` 会返回每个凭据的 `health`、`lastErrorSummary` 和最近状态事件。常见状态含义：
+
+| 状态 | 含义 | 默认恢复策略 |
+|------|------|--------------|
+| `healthy` | 可正常调度 | 无需处理 |
+| `rate_limited` / `cooling_down` | 本地 RPM、429 或上游瞬态错误冷却中 | 冷却结束后自然回池，也可手动清除冷却 |
+| `token_refresh_failed` / `failure_limited` / `unknown_failure` | Token 刷新或 API 调用出现可恢复失败 | 可通过 Admin 的“恢复”重置计数 |
+| `authentication_failed` / `account_suspended` | 认证失败或账号暂停 | 不自动恢复，需重新导入或验活成功后恢复 |
+| `quota_exceeded` / `insufficient_balance` | 配额或余额不足 | 不自动恢复，需等待额度恢复或更换账号 |
+| `model_unavailable` | 当前账号/区域/端点模型不可用 | 不自动恢复，需验活成功后恢复 |
+| `disabled_manual` | 手动禁用 | 只按显式操作恢复 |
+
+`smoke-check` 会使用指定凭据真实发送一条最小消息，请求成功才视为验活通过；它可能消耗少量额度。新增凭据和批量导入中的 smoke check 同样遵循这个规则。
+
+### RPM 与 429 策略
+
+`credentialRpm` 控制单个凭据的目标请求速率。未配置或配置为 `0` 时使用内置默认节流策略；配置为正数时，每个凭据按 `60_000 / credentialRpm` 毫秒的固定间隔放行请求。
+
+命中本地 RPM 限制时，该凭据会临时跳过，调度器优先选择其他可用凭据。上游返回 `429 Too Many Requests` 时，只会让当前凭据进入冷却，并记录最近错误摘要；不会扩大影响到全部凭据。上游 408/5xx 或网络发送失败会进入短冷却，冷却结束后自然回池。
 
 ## 注意事项
 

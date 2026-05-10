@@ -436,7 +436,7 @@ impl AdminErrorResponse {
 pub struct GlobalConfigResponse {
     /// AWS Region
     pub region: String,
-    /// 单凭据目标请求速率（RPM），None 表示无限制
+    /// 单凭据目标请求速率（RPM），None 表示使用内置默认节流策略
     pub credential_rpm: Option<u32>,
     /// Prompt Cache TTL（秒）
     pub prompt_cache_ttl_seconds: u64,
