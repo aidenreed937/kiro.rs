@@ -10,8 +10,8 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, ImportTokenJsonFromPathRequest, ImportTokenJsonRequest,
-        SetDisabledRequest, SetEndpointRequest, SetPriorityRequest, SetRegionRequest,
-        SuccessResponse, UpdateProxyConfigRequest,
+        RecoverCredentialRequest, SetDisabledRequest, SetEndpointRequest, SetPriorityRequest,
+        SetRegionRequest, SuccessResponse, UpdateProxyConfigRequest,
     },
 };
 
@@ -116,6 +116,50 @@ pub async fn force_refresh_token(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/smoke-check
+/// 使用指定凭据发送最小消息验活
+pub async fn smoke_check_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.smoke_check_existing_credential(id).await {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 发消息验活通过", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/cooldown/clear
+/// 清除指定凭据的冷却状态
+pub async fn clear_credential_cooldown(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.clear_credential_cooldown(id) {
+        Ok(true) => Json(SuccessResponse::new(format!("凭据 #{} 冷却已清除", id))).into_response(),
+        Ok(false) => {
+            Json(SuccessResponse::new(format!("凭据 #{} 当前没有冷却", id))).into_response()
+        }
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/recover
+/// 恢复可恢复状态；高风险状态需请求 smokeCheck=true
+pub async fn recover_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<RecoverCredentialRequest>,
+) -> impl IntoResponse {
+    match state
+        .service
+        .recover_credential(id, payload.smoke_check)
+        .await
+    {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已恢复", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

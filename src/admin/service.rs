@@ -201,6 +201,49 @@ impl AdminService {
             .map_err(|e| self.classify_error(e, id))
     }
 
+    pub async fn smoke_check_existing_credential(&self, id: u64) -> Result<(), AdminServiceError> {
+        match self.smoke_check_credential(id).await {
+            Ok(()) => {
+                if let Err(e) =
+                    self.token_manager
+                        .record_smoke_check_result(id, true, Some("发消息验活通过"))
+                {
+                    tracing::warn!("记录凭据 #{} 验活成功事件失败: {}", id, e);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let message = e.to_string();
+                if let Err(record_err) =
+                    self.token_manager
+                        .record_smoke_check_result(id, false, Some(&message))
+                {
+                    tracing::warn!("记录凭据 #{} 验活失败事件失败: {}", id, record_err);
+                }
+                Err(self.classify_balance_error(anyhow::anyhow!(message), id))
+            }
+        }
+    }
+
+    pub fn clear_credential_cooldown(&self, id: u64) -> Result<bool, AdminServiceError> {
+        self.token_manager
+            .clear_credential_cooldown_for_admin(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    pub async fn recover_credential(
+        &self,
+        id: u64,
+        smoke_check: bool,
+    ) -> Result<(), AdminServiceError> {
+        if smoke_check {
+            self.smoke_check_existing_credential(id).await?;
+        }
+        self.token_manager
+            .recover_for_admin(id, smoke_check)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
     /// 获取凭据余额（带缓存）
     pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         // 先查缓存

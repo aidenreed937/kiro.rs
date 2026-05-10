@@ -12,6 +12,7 @@ use super::{
         import_token_json, import_token_json_from_path, reset_failure_count,
         set_credential_disabled, set_credential_endpoint, set_credential_priority,
         set_credential_region, update_global_config, update_proxy_config,
+        clear_credential_cooldown, recover_credential, smoke_check_credential,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -26,6 +27,9 @@ use super::{
 /// - `POST /credentials/:id/disabled` - 设置凭据禁用状态
 /// - `POST /credentials/:id/priority` - 设置凭据优先级
 /// - `POST /credentials/:id/reset` - 重置失败计数
+/// - `POST /credentials/:id/recover` - 恢复可恢复凭据状态
+/// - `POST /credentials/:id/smoke-check` - 发送最小消息验活
+/// - `POST /credentials/:id/cooldown/clear` - 清除凭据冷却
 /// - `GET /credentials/:id/balance` - 获取凭据余额
 /// - `GET /credentials/balances/cached` - 获取所有凭据的缓存余额
 ///
@@ -51,6 +55,15 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/region", post(set_credential_region))
         .route("/credentials/{id}/endpoint", post(set_credential_endpoint))
         .route("/credentials/{id}/reset", post(reset_failure_count))
+        .route("/credentials/{id}/recover", post(recover_credential))
+        .route(
+            "/credentials/{id}/smoke-check",
+            post(smoke_check_credential),
+        )
+        .route(
+            "/credentials/{id}/cooldown/clear",
+            post(clear_credential_cooldown),
+        )
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/proxy", get(get_proxy_config).post(update_proxy_config))

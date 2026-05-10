@@ -35,6 +35,9 @@ import {
   useSetEndpoint,
   useSetPriority,
   useSetRegion,
+  useSmokeCheckCredential,
+  useClearCredentialCooldown,
+  useRecoverCredential,
 } from '@/hooks/use-credentials'
 import { cn } from '@/lib/utils'
 
@@ -175,6 +178,10 @@ function eventKindLabel(kind: NonNullable<CredentialStatusItem['stateEvents']>[n
       return '调用成功'
     case 'api_failure':
       return '调用失败'
+    case 'smoke_check_success':
+      return '验活成功'
+    case 'smoke_check_failure':
+      return '验活失败'
     case 'token_refresh_success':
       return '刷新成功'
     case 'token_refresh_failure':
@@ -187,6 +194,8 @@ function eventKindLabel(kind: NonNullable<CredentialStatusItem['stateEvents']>[n
       return '手动启用'
     case 'reset_and_enable':
       return '重置启用'
+    case 'clear_cooldown':
+      return '清除冷却'
     case 'quota_exceeded':
       return '配额耗尽'
     case 'model_unavailable':
@@ -231,8 +240,28 @@ export function CredentialCard({
   const setRegion = useSetRegion()
   const setEndpoint = useSetEndpoint()
   const resetFailure = useResetFailure()
+  const smokeCheckCredential = useSmokeCheckCredential()
+  const clearCooldown = useClearCredentialCooldown()
+  const recoverCredential = useRecoverCredential()
   const forceRefreshToken = useForceRefreshToken()
   const deleteCredential = useDeleteCredential()
+
+  const recoverableWithoutSmoke = [
+    'cooling_down',
+    'rate_limited',
+    'token_refresh_failed',
+    'failure_limited',
+    'unknown_failure',
+  ].includes(credential.health.status)
+  const recoverableWithSmoke = [
+    'disabled_manual',
+    'authentication_failed',
+    'account_suspended',
+    'quota_exceeded',
+    'model_unavailable',
+    'insufficient_balance',
+  ].includes(credential.health.status)
+  const hasCooldown = credential.health.retryAfterSecs !== undefined && credential.health.retryAfterSecs !== null
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -335,6 +364,42 @@ export function CredentialCard({
         toast.error('刷新失败: ' + (err as Error).message)
       },
     })
+  }
+
+  const handleSmokeCheck = () => {
+    smokeCheckCredential.mutate(credential.id, {
+      onSuccess: (res) => {
+        toast.success(res.message)
+      },
+      onError: (err) => {
+        toast.error('验活失败: ' + (err as Error).message)
+      },
+    })
+  }
+
+  const handleClearCooldown = () => {
+    clearCooldown.mutate(credential.id, {
+      onSuccess: (res) => {
+        toast.success(res.message)
+      },
+      onError: (err) => {
+        toast.error('清除冷却失败: ' + (err as Error).message)
+      },
+    })
+  }
+
+  const handleRecover = (smokeCheck: boolean) => {
+    recoverCredential.mutate(
+      { id: credential.id, smokeCheck },
+      {
+        onSuccess: (res) => {
+          toast.success(res.message)
+        },
+        onError: (err) => {
+          toast.error('恢复失败: ' + (err as Error).message)
+        },
+      }
+    )
   }
 
   const handleDelete = () => {
@@ -477,7 +542,7 @@ export function CredentialCard({
               )}
             </div>
 
-            <div className="grid grid-cols-6 gap-1">
+            <div className="grid grid-cols-9 gap-1">
               <Button size="icon" variant="ghost" className="h-8 w-8" onClick={handleViewBalance} title="刷新余额">
                 <Wallet className="h-4 w-4" />
               </Button>
@@ -503,6 +568,39 @@ export function CredentialCard({
                 title="重置失败状态"
               >
                 <RotateCcw className="h-4 w-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={handleSmokeCheck}
+                disabled={smokeCheckCredential.isPending}
+                title="重新验活"
+              >
+                <RotateCcw className={cn('h-4 w-4', smokeCheckCredential.isPending && 'animate-spin')} />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={handleClearCooldown}
+                disabled={clearCooldown.isPending || !hasCooldown}
+                title="清除冷却"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={() => handleRecover(recoverableWithSmoke)}
+                disabled={
+                  recoverCredential.isPending ||
+                  (!recoverableWithoutSmoke && !recoverableWithSmoke)
+                }
+                title={recoverableWithSmoke ? '验活恢复' : '恢复凭据'}
+              >
+                <RotateCcw className={cn('h-4 w-4', recoverCredential.isPending && 'animate-spin')} />
               </Button>
               <Button
                 size="icon"

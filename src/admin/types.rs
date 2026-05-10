@@ -175,6 +175,13 @@ pub struct AddCredentialResponse {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverCredentialRequest {
+    #[serde(default)]
+    pub smoke_check: bool,
+}
+
 // ============ 余额查询 ============
 
 /// 余额查询响应

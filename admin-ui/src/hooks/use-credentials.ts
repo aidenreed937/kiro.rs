@@ -8,6 +8,9 @@ import {
   setCredentialRegion,
   setCredentialEndpoint,
   resetCredentialFailure,
+  smokeCheckCredential,
+  clearCredentialCooldown,
+  recoverCredential,
   forceRefreshToken,
   getCredentialBalance,
   getCachedBalances,
@@ -150,6 +153,38 @@ export function useResetFailure() {
     mutationFn: (id: number) => resetCredentialFailure(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useSmokeCheckCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => smokeCheckCredential(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useClearCredentialCooldown() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => clearCredentialCooldown(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useRecoverCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, smokeCheck }: { id: number; smokeCheck?: boolean }) =>
+      recoverCredential(id, { smokeCheck }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
     },
   })
 }

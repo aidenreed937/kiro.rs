@@ -8,6 +8,7 @@ import type {
   SetDisabledRequest,
   SetPriorityRequest,
   SetEndpointRequest,
+  RecoverCredentialRequest,
   AddCredentialRequest,
   AddCredentialResponse,
   CredentialStatsResponse,
@@ -73,6 +74,24 @@ export async function resetCredentialFailure(
   id: number
 ): Promise<SuccessResponse> {
   const { data } = await api.post<SuccessResponse>(`/credentials/${id}/reset`)
+  return data
+}
+
+export async function smokeCheckCredential(id: number): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/smoke-check`)
+  return data
+}
+
+export async function clearCredentialCooldown(id: number): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/cooldown/clear`)
+  return data
+}
+
+export async function recoverCredential(
+  id: number,
+  req: RecoverCredentialRequest = {}
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/recover`, req)
   return data
 }
 

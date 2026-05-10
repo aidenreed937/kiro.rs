@@ -31,12 +31,15 @@ export interface CredentialHealth {
 export type CredentialStateEventKind =
   | 'api_success'
   | 'api_failure'
+  | 'smoke_check_success'
+  | 'smoke_check_failure'
   | 'token_refresh_success'
   | 'token_refresh_failure'
   | 'auto_recover'
   | 'manual_disable'
   | 'manual_enable'
   | 'reset_and_enable'
+  | 'clear_cooldown'
   | 'quota_exceeded'
   | 'model_unavailable'
   | 'authentication_failed'
@@ -205,6 +208,10 @@ export interface AddCredentialRequest {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  smokeCheck?: boolean
+}
+
+export interface RecoverCredentialRequest {
   smokeCheck?: boolean
 }
 

@@ -580,12 +580,15 @@ enum CredentialStateTransition {
 pub enum CredentialStateEventKind {
     ApiSuccess,
     ApiFailure,
+    SmokeCheckSuccess,
+    SmokeCheckFailure,
     TokenRefreshSuccess,
     TokenRefreshFailure,
     AutoRecover,
     ManualDisable,
     ManualEnable,
     ResetAndEnable,
+    ClearCooldown,
     QuotaExceeded,
     ModelUnavailable,
     AuthenticationFailed,
@@ -876,6 +879,7 @@ impl CredentialStateEventKind {
             self,
             CredentialStateEventKind::ApiFailure
                 | CredentialStateEventKind::TokenRefreshFailure
+                | CredentialStateEventKind::SmokeCheckFailure
                 | CredentialStateEventKind::QuotaExceeded
                 | CredentialStateEventKind::ModelUnavailable
                 | CredentialStateEventKind::AuthenticationFailed
@@ -893,6 +897,8 @@ impl CredentialStateEventKind {
             CredentialStateEventKind::ManualDisable
                 | CredentialStateEventKind::ManualEnable
                 | CredentialStateEventKind::ResetAndEnable
+                | CredentialStateEventKind::SmokeCheckSuccess
+                | CredentialStateEventKind::ClearCooldown
         )
     }
 }
@@ -1235,6 +1241,31 @@ fn cooldown_health_status(reason: CooldownReason) -> CredentialHealthStatus {
         CooldownReason::ModelUnavailable => CredentialHealthStatus::ModelUnavailable,
         CooldownReason::ServerError => CredentialHealthStatus::CoolingDown,
     }
+}
+
+fn is_admin_recoverable_without_smoke(
+    entry: &CredentialEntry,
+    cooldown_reason: Option<CooldownReason>,
+) -> bool {
+    if entry.disabled {
+        return matches!(
+            entry.disable_reason,
+            Some(DisableReason::FailureLimit | DisableReason::RefreshFailureLimit)
+        );
+    }
+
+    if matches!(
+        cooldown_reason,
+        Some(
+            CooldownReason::RateLimitExceeded
+                | CooldownReason::TokenRefreshFailed
+                | CooldownReason::ServerError
+        )
+    ) {
+        return true;
+    }
+
+    entry.failure_count > 0 || entry.refresh_failure_count > 0
 }
 
 /// API 调用上下文
@@ -2177,9 +2208,6 @@ impl MultiTokenManager {
                 .iter()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?;
-            if entry.disabled {
-                anyhow::bail!("凭据 #{} 已禁用", id);
-            }
             entry.credentials.clone()
         };
 
@@ -3393,6 +3421,59 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    pub fn recover_for_admin(&self, id: u64, smoke_check_passed: bool) -> anyhow::Result<()> {
+        let cooldown_reason = self
+            .cooldown_manager
+            .check_cooldown(id)
+            .map(|(reason, _)| reason);
+        let clear_cooldown = cooldown_reason.is_some();
+
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+
+            if !smoke_check_passed && !is_admin_recoverable_without_smoke(entry, cooldown_reason) {
+                anyhow::bail!("当前状态需要先通过发消息验活后才能恢复");
+            }
+
+            entry.transition(CredentialStateTransition::ResetAndEnable);
+        }
+
+        if clear_cooldown {
+            self.cooldown_manager.clear_cooldown(id);
+        }
+
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    pub fn record_smoke_check_result(
+        &self,
+        id: u64,
+        success: bool,
+        message: Option<&str>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            let kind = if success {
+                CredentialStateEventKind::SmokeCheckSuccess
+            } else {
+                CredentialStateEventKind::SmokeCheckFailure
+            };
+            let status = entry.stored_health_status();
+            entry.append_state_event(kind, status, message);
+        }
+        self.save_stats_debounced();
+        Ok(())
+    }
+
     /// 强制刷新指定凭据的 Token（Admin API）
     pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
         let config = self.config.read().clone();
@@ -3864,6 +3945,29 @@ impl MultiTokenManager {
     #[allow(dead_code)]
     pub fn clear_credential_cooldown(&self, id: u64) -> bool {
         self.cooldown_manager.clear_cooldown(id)
+    }
+
+    pub fn clear_credential_cooldown_for_admin(&self, id: u64) -> anyhow::Result<bool> {
+        let cleared = self.cooldown_manager.clear_cooldown(id);
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            if cleared {
+                let status = entry.stored_health_status();
+                entry.append_state_event(
+                    CredentialStateEventKind::ClearCooldown,
+                    status,
+                    Some("手动清除冷却"),
+                );
+            }
+        }
+        if cleared {
+            self.save_stats_debounced();
+        }
+        Ok(cleared)
     }
 
     /// 获取即将过期的凭据 ID 列表
@@ -4601,6 +4705,47 @@ mod tests {
         assert!(manager.clear_credential_cooldown(1));
         assert!(manager.rate_limiter().try_acquire(1).is_ok());
         assert!(!manager.is_credential_available(1));
+    }
+
+    #[test]
+    fn test_admin_recover_requires_smoke_for_terminal_states() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        manager.report_quota_exhausted(1);
+        let err = manager.recover_for_admin(1, false).err().unwrap();
+        assert!(err.to_string().contains("需要先通过发消息验活"));
+
+        manager.recover_for_admin(1, true).unwrap();
+        let snapshot = manager.snapshot();
+        assert!(!snapshot.entries[0].disabled);
+        assert_eq!(snapshot.entries[0].failure_count, 0);
+    }
+
+    #[test]
+    fn test_admin_recover_clears_retryable_cooldown() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_secs(120)),
+        );
+
+        manager.recover_for_admin(1, false).unwrap();
+        assert!(manager.cooldown_manager().check_cooldown(1).is_none());
+        let snapshot = manager.snapshot();
+        assert!(
+            snapshot.entries[0]
+                .state_events
+                .iter()
+                .any(|event| event.kind == CredentialStateEventKind::ResetAndEnable)
+        );
     }
 
     #[test]
