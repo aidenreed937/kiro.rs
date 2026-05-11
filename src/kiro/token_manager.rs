@@ -1826,6 +1826,7 @@ impl MultiTokenManager {
                 );
             }
 
+            let mut recovered_auto_disabled = false;
             let candidate_infos: Vec<CredentialSelectionInfo> = {
                 let mut entries = self.entries.lock();
 
@@ -1850,6 +1851,7 @@ impl MultiTokenManager {
                     for e in entries.iter_mut() {
                         if e.auto_heal_reason == Some(AutoHealReason::TooManyFailures) {
                             e.transition(CredentialStateTransition::AutoRecover);
+                            recovered_auto_disabled = true;
                         }
                     }
 
@@ -1881,6 +1883,9 @@ impl MultiTokenManager {
 
                 candidates
             };
+            if recovered_auto_disabled {
+                self.save_stats_debounced();
+            }
 
             if candidate_infos.is_empty() {
                 continue;
@@ -2325,12 +2330,20 @@ impl MultiTokenManager {
                                     return Err(err);
                                 }
 
-                                let has_available = {
+                                let (has_available, recorded_failure) = {
                                     let mut entries = self.entries.lock();
-                                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                                    let recorded_failure = if let Some(entry) =
+                                        entries.iter_mut().find(|e| e.id == id)
+                                    {
                                         entry.record_refresh_failure(Some(&err.to_string()));
-                                    }
-                                    entries.iter().any(|e| !e.disabled && e.id != id)
+                                        true
+                                    } else {
+                                        false
+                                    };
+                                    (
+                                        entries.iter().any(|e| !e.disabled && e.id != id),
+                                        recorded_failure,
+                                    )
                                 };
                                 tracing::warn!(
                                     credential_id = id,
@@ -2338,6 +2351,9 @@ impl MultiTokenManager {
                                     "凭据 Token 刷新失败: {}",
                                     err
                                 );
+                                if recorded_failure {
+                                    self.save_stats_debounced();
+                                }
                                 return Err(err);
                             }
                         };
@@ -2360,6 +2376,7 @@ impl MultiTokenManager {
                     if let Err(e) = self.persist_credentials() {
                         tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
                     }
+                    self.save_stats_debounced();
 
                     new_creds
                 }
@@ -2639,11 +2656,13 @@ impl MultiTokenManager {
     ///
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
+    #[allow(dead_code)]
     pub fn report_failure(&self, id: u64) -> bool {
         self.report_failure_with_error(id, None)
     }
 
     pub fn report_failure_with_error(&self, id: u64, error_message: Option<&str>) -> bool {
+        let mut remove_affinity = false;
         let result = {
             let mut entries = self.entries.lock();
 
@@ -2664,18 +2683,15 @@ impl MultiTokenManager {
 
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
                 tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
-
-                // 移除该凭据的亲和性绑定
-                drop(entries);
-                self.affinity.remove_by_credential(id);
-
-                let entries = self.entries.lock();
-                return entries.iter().any(|e| !e.disabled);
+                remove_affinity = true;
             }
 
             // 检查是否还有可用凭据
             entries.iter().any(|e| !e.disabled)
         };
+        if remove_affinity {
+            self.affinity.remove_by_credential(id);
+        }
         self.save_stats_debounced();
         result
     }
@@ -2686,6 +2702,7 @@ impl MultiTokenManager {
     /// - 立即禁用该凭据（不等待连续失败阈值）
     /// - 切换到下一个可用凭据继续重试
     /// - 返回是否还有可用凭据
+    #[allow(dead_code)]
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
         self.report_quota_exhausted_with_error(id, None)
     }
@@ -2739,29 +2756,38 @@ impl MultiTokenManager {
 
     /// 禁用所有凭据
     fn disable_all_credentials(&self, reason: DisableReason) {
-        let mut entries = self.entries.lock();
-        let mut recovery_time = self.global_recovery_time.lock();
+        let changed = {
+            let mut entries = self.entries.lock();
+            let mut recovery_time = self.global_recovery_time.lock();
+            let mut changed = false;
 
-        for entry in entries.iter_mut() {
-            if !entry.disabled {
-                match reason {
-                    DisableReason::ModelUnavailable => {
-                        entry.transition(CredentialStateTransition::DisableForModelUnavailable);
+            for entry in entries.iter_mut() {
+                if !entry.disabled {
+                    match reason {
+                        DisableReason::ModelUnavailable => {
+                            entry.transition(CredentialStateTransition::DisableForModelUnavailable);
+                        }
+                        _ => entry.transition(CredentialStateTransition::DisableTerminal(reason)),
                     }
-                    _ => entry.transition(CredentialStateTransition::DisableTerminal(reason)),
+                    changed = true;
                 }
             }
+
+            // 设置恢复时间
+            let recover_at = Utc::now() + Duration::minutes(GLOBAL_DISABLE_RECOVERY_MINUTES);
+            *recovery_time = Some(recover_at);
+
+            tracing::error!(
+                "所有凭据已被禁用（原因: {:?}），将于 {} 自动恢复",
+                reason,
+                recover_at.format("%H:%M:%S")
+            );
+
+            changed
+        };
+        if changed {
+            self.save_stats_debounced();
         }
-
-        // 设置恢复时间
-        let recover_at = Utc::now() + Duration::minutes(GLOBAL_DISABLE_RECOVERY_MINUTES);
-        *recovery_time = Some(recover_at);
-
-        tracing::error!(
-            "所有凭据已被禁用（原因: {:?}），将于 {} 自动恢复",
-            reason,
-            recover_at.format("%H:%M:%S")
-        );
     }
 
     /// 检查并执行自动恢复
@@ -2780,24 +2806,29 @@ impl MultiTokenManager {
             return false;
         }
 
-        let mut entries = self.entries.lock();
-        let mut recovery_time = self.global_recovery_time.lock();
-        let mut recovered_count = 0;
+        let recovered_count = {
+            let mut entries = self.entries.lock();
+            let mut recovery_time = self.global_recovery_time.lock();
+            let mut recovered_count = 0;
 
-        for entry in entries.iter_mut() {
-            // 只恢复因 ModelUnavailable 禁用的凭据，余额不足的不恢复
-            if entry.disabled && entry.disable_reason == Some(DisableReason::ModelUnavailable) {
-                entry.transition(CredentialStateTransition::AutoRecover);
-                recovered_count += 1;
+            for entry in entries.iter_mut() {
+                // 只恢复因 ModelUnavailable 禁用的凭据，余额不足的不恢复
+                if entry.disabled && entry.disable_reason == Some(DisableReason::ModelUnavailable) {
+                    entry.transition(CredentialStateTransition::AutoRecover);
+                    recovered_count += 1;
+                }
             }
-        }
 
-        // 重置全局状态
-        *recovery_time = None;
-        self.model_unavailable_count.store(0, Ordering::SeqCst);
+            // 重置全局状态
+            *recovery_time = None;
+            self.model_unavailable_count.store(0, Ordering::SeqCst);
+
+            recovered_count
+        };
 
         if recovered_count > 0 {
             tracing::info!("已自动恢复 {} 个凭据", recovered_count);
+            self.save_stats_debounced();
         }
 
         recovered_count > 0
@@ -2805,38 +2836,60 @@ impl MultiTokenManager {
 
     /// 标记凭据为认证失败（如 invalid_grant，不会被自动恢复）
     pub fn mark_authentication_failed(&self, id: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.transition(CredentialStateTransition::DisableTerminal(
-                DisableReason::AuthenticationFailed,
-            ));
-            tracing::warn!("凭据 #{} 已标记为认证失败", id);
+        let changed = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.transition(CredentialStateTransition::DisableTerminal(
+                    DisableReason::AuthenticationFailed,
+                ));
+                tracing::warn!("凭据 #{} 已标记为认证失败", id);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.affinity.remove_by_credential(id);
+            self.save_stats_debounced();
         }
-        drop(entries);
-        self.affinity.remove_by_credential(id);
     }
 
     /// 标记凭据为账户暂停（不会被自动恢复）
     pub fn mark_account_suspended(&self, id: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.transition(CredentialStateTransition::DisableTerminal(
-                DisableReason::AccountSuspended,
-            ));
-            tracing::warn!("凭据 #{} 已标记为账户暂停", id);
+        let changed = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.transition(CredentialStateTransition::DisableTerminal(
+                    DisableReason::AccountSuspended,
+                ));
+                tracing::warn!("凭据 #{} 已标记为账户暂停", id);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.affinity.remove_by_credential(id);
+            self.save_stats_debounced();
         }
-        drop(entries);
-        self.affinity.remove_by_credential(id);
     }
 
     /// 标记凭据为余额不足（不会被自动恢复）
     pub fn mark_insufficient_balance(&self, id: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.transition(CredentialStateTransition::DisableTerminal(
-                DisableReason::InsufficientBalance,
-            ));
-            tracing::warn!("凭据 #{} 已标记为余额不足", id);
+        let changed = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.transition(CredentialStateTransition::DisableTerminal(
+                    DisableReason::InsufficientBalance,
+                ));
+                tracing::warn!("凭据 #{} 已标记为余额不足", id);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.save_stats_debounced();
         }
     }
 
@@ -2894,12 +2947,24 @@ impl MultiTokenManager {
 
                     // 余额小于 1 时自动禁用凭据
                     if remaining < 1.0 {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.transition(CredentialStateTransition::DisableTerminal(
-                                DisableReason::InsufficientBalance,
-                            ));
-                            tracing::warn!("凭据 #{} 余额不足 ({:.2})，已自动禁用", id, remaining);
+                        let changed = {
+                            let mut entries = self.entries.lock();
+                            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                                entry.transition(CredentialStateTransition::DisableTerminal(
+                                    DisableReason::InsufficientBalance,
+                                ));
+                                tracing::warn!(
+                                    "凭据 #{} 余额不足 ({:.2})，已自动禁用",
+                                    id,
+                                    remaining
+                                );
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if changed {
+                            self.save_stats_debounced();
                         }
                     } else {
                         tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
@@ -3150,6 +3215,7 @@ impl MultiTokenManager {
         }
         // 持久化更改
         self.persist_credentials()?;
+        self.save_stats_debounced();
         Ok(())
     }
 
@@ -3214,6 +3280,7 @@ impl MultiTokenManager {
         }
         // 持久化更改
         self.persist_credentials()?;
+        self.save_stats_debounced();
         Ok(())
     }
 
@@ -3256,6 +3323,7 @@ impl MultiTokenManager {
         }
 
         self.persist_credentials()?;
+        self.save_stats_debounced();
         Ok(())
     }
 
@@ -3926,6 +3994,36 @@ mod tests {
         assert_eq!(entry.auto_heal_reason, None);
         assert_eq!(entry.disable_reason, Some(DisableReason::AccountSuspended));
         assert_eq!(entry.last_error_summary, None);
+    }
+
+    #[test]
+    fn test_report_failure_at_limit_marks_stats_dirty() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        for _ in 1..MAX_FAILURES_PER_CREDENTIAL {
+            assert!(manager.report_failure(1));
+        }
+
+        manager.stats_dirty.store(false, Ordering::Relaxed);
+
+        assert!(!manager.report_failure_with_error(1, Some("final failure")));
+        assert!(manager.stats_dirty.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_terminal_disable_marks_stats_dirty() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        manager.stats_dirty.store(false, Ordering::Relaxed);
+
+        manager.mark_authentication_failed(1);
+        assert!(manager.stats_dirty.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
