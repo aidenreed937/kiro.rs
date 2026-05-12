@@ -7,12 +7,12 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_cached_balances, get_credential_balance, get_global_config, get_proxy_config,
-        import_token_json, import_token_json_from_path, reset_failure_count,
-        set_credential_disabled, set_credential_endpoint, set_credential_priority,
-        set_credential_region, update_global_config, update_proxy_config,
-        clear_credential_cooldown, recover_credential, smoke_check_credential,
+        add_credential, clear_credential_cooldown, delete_credential, force_refresh_token,
+        get_all_credentials, get_cached_balances, get_credential_balance, get_global_config,
+        get_proxy_config, import_token_json, import_token_json_from_path, recover_credential,
+        reset_failure_count, set_credential_disabled, set_credential_endpoint,
+        set_credential_priority, set_credential_region, smoke_check_credential,
+        update_global_config, update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };

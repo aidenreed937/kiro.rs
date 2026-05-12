@@ -1175,6 +1175,13 @@ enum CredentialGate {
     },
 }
 
+#[derive(Debug, Default)]
+struct CandidateGateStats {
+    min_wait: Option<std::time::Duration>,
+    min_wait_detail: Option<(u64, &'static str, std::time::Duration)>,
+    cooling_skipped: usize,
+}
+
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 const MAX_CREDENTIAL_STATE_EVENTS: usize = 20;
@@ -1735,9 +1742,7 @@ impl MultiTokenManager {
         tried_ids: &mut Vec<u64>,
         consume_rate_limit: bool,
         model_id: Option<&str>,
-        min_wait: &mut Option<std::time::Duration>,
-        min_wait_detail: &mut Option<(u64, &'static str, std::time::Duration)>,
-        cooling_skipped: &mut usize,
+        stats: &mut CandidateGateStats,
     ) -> Vec<CredentialSelectionInfo> {
         let mut candidates = Vec::new();
 
@@ -1766,11 +1771,16 @@ impl MultiTokenManager {
                         remaining_ms = %remaining.as_millis(),
                         "凭据健康门控：冷却中，跳过"
                     );
-                    if min_wait.map(|w| remaining < w).unwrap_or(true) {
-                        *min_wait_detail = Some((id, "cooldown", remaining));
+                    if stats.min_wait.map(|w| remaining < w).unwrap_or(true) {
+                        stats.min_wait_detail = Some((id, "cooldown", remaining));
                     }
-                    *min_wait = Some(min_wait.map(|w| w.min(remaining)).unwrap_or(remaining));
-                    *cooling_skipped += 1;
+                    stats.min_wait = Some(
+                        stats
+                            .min_wait
+                            .map(|w| w.min(remaining))
+                            .unwrap_or(remaining),
+                    );
+                    stats.cooling_skipped += 1;
                     tried_ids.push(id);
                 }
                 CredentialGate::RateLimited { id, wait } => {
@@ -1779,11 +1789,11 @@ impl MultiTokenManager {
                         wait_ms = %wait.as_millis(),
                         "凭据健康门控：速率限制，跳过"
                     );
-                    if min_wait.map(|w| wait < w).unwrap_or(true) {
-                        *min_wait_detail = Some((id, "rate_limit", wait));
+                    if stats.min_wait.map(|w| wait < w).unwrap_or(true) {
+                        stats.min_wait_detail = Some((id, "rate_limit", wait));
                     }
-                    *min_wait = Some(min_wait.map(|w| w.min(wait)).unwrap_or(wait));
-                    *cooling_skipped += 1;
+                    stats.min_wait = Some(stats.min_wait.map(|w| w.min(wait)).unwrap_or(wait));
+                    stats.cooling_skipped += 1;
                     tried_ids.push(id);
                 }
                 CredentialGate::Disabled | CredentialGate::Tried => {}
@@ -1815,14 +1825,7 @@ impl MultiTokenManager {
 
         let total = self.total_count();
         let mut tried_ids: Vec<u64> = Vec::new();
-        // 当所有凭据都因“临时不可用”（冷却/速率限制）被跳过时，等待最短可用时间再重试。
-        let mut min_wait: Option<std::time::Duration> = None;
-        // 记录最短等待时间来自哪个凭据/原因，便于排障定位（冷却 vs 速率限制）。
-        let mut min_wait_detail: Option<(u64, &'static str, std::time::Duration)> = None;
-        // 追踪仅因冷却/速率限制被跳过的凭据数量。
-        // 只有当“所有被跳过的凭据都是冷却/限流”时才触发 429 + Retry-After；
-        // 若混杂了 token 刷新失败等非临时性错误，应走常规 sleep-retry 路径保留原有语义。
-        let mut cooling_skipped: usize = 0;
+        let mut gate_stats = CandidateGateStats::default();
 
         loop {
             // tried_ids 只会记录“本轮已经尝试过的可用凭据”（disabled 的不会被选中）。
@@ -1833,20 +1836,21 @@ impl MultiTokenManager {
             // "所有凭据均已禁用（x/y）" 这类与事实不符的错误。
             let enabled_total = self.available_count_for_model(model_id);
             if enabled_total > 0 && tried_ids.len() >= enabled_total {
-                if let Some(wait) = min_wait {
+                if let Some(wait) = gate_stats.min_wait {
                     // 仅当本轮所有被跳过的凭据都因冷却/限流时，才以 429 + Retry-After 快速返回；
                     // 若混杂 token 刷新失败等非临时性错误，保留原有 sleep-retry 语义以避免吞掉真实错误。
-                    let all_due_to_cooling = cooling_skipped == tried_ids.len();
+                    let all_due_to_cooling = gate_stats.cooling_skipped == tried_ids.len();
                     if all_due_to_cooling && wait > ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD {
                         self.debug_log_availability_diagnostics(
                             "enabled_exhausted_bail_long_wait",
                             &tried_ids,
-                            min_wait,
-                            min_wait_detail,
+                            gate_stats.min_wait,
+                            gate_stats.min_wait_detail,
                         );
                         // Retry-After 语义要求向上取整，避免客户端在实际等待结束前提前重试。
                         let secs = (wait.as_millis().div_ceil(1000) as u64).max(1);
-                        let (cid, source) = min_wait_detail
+                        let (cid, source) = gate_stats
+                            .min_wait_detail
                             .map(|(id, src, _)| (id, src))
                             .unwrap_or((0, "unknown"));
                         anyhow::bail!(
@@ -1859,21 +1863,19 @@ impl MultiTokenManager {
                     self.debug_log_availability_diagnostics(
                         "enabled_exhausted_sleep",
                         &tried_ids,
-                        min_wait,
-                        min_wait_detail,
+                        gate_stats.min_wait,
+                        gate_stats.min_wait_detail,
                     );
                     tokio::time::sleep(wait).await;
                     tried_ids.clear();
-                    cooling_skipped = 0;
-                    min_wait = None;
-                    min_wait_detail = None;
+                    gate_stats = CandidateGateStats::default();
                     continue;
                 }
                 self.debug_log_availability_diagnostics(
                     "enabled_exhausted_bail",
                     &tried_ids,
-                    min_wait,
-                    min_wait_detail,
+                    gate_stats.min_wait,
+                    gate_stats.min_wait_detail,
                 );
                 anyhow::bail!(
                     "所有可用凭据均无法获取有效 Token（可用: {}/{}）",
@@ -1883,17 +1885,18 @@ impl MultiTokenManager {
             }
 
             if tried_ids.len() >= total {
-                if let Some(wait) = min_wait {
-                    let all_due_to_cooling = cooling_skipped == tried_ids.len();
+                if let Some(wait) = gate_stats.min_wait {
+                    let all_due_to_cooling = gate_stats.cooling_skipped == tried_ids.len();
                     if all_due_to_cooling && wait > ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD {
                         self.debug_log_availability_diagnostics(
                             "total_exhausted_bail_long_wait",
                             &tried_ids,
-                            min_wait,
-                            min_wait_detail,
+                            gate_stats.min_wait,
+                            gate_stats.min_wait_detail,
                         );
                         let secs = (wait.as_millis().div_ceil(1000) as u64).max(1);
-                        let (cid, source) = min_wait_detail
+                        let (cid, source) = gate_stats
+                            .min_wait_detail
                             .map(|(id, src, _)| (id, src))
                             .unwrap_or((0, "unknown"));
                         anyhow::bail!(
@@ -1906,21 +1909,19 @@ impl MultiTokenManager {
                     self.debug_log_availability_diagnostics(
                         "total_exhausted_sleep",
                         &tried_ids,
-                        min_wait,
-                        min_wait_detail,
+                        gate_stats.min_wait,
+                        gate_stats.min_wait_detail,
                     );
                     tokio::time::sleep(wait).await;
                     tried_ids.clear();
-                    cooling_skipped = 0;
-                    min_wait = None;
-                    min_wait_detail = None;
+                    gate_stats = CandidateGateStats::default();
                     continue;
                 }
                 self.debug_log_availability_diagnostics(
                     "total_exhausted_bail",
                     &tried_ids,
-                    min_wait,
-                    min_wait_detail,
+                    gate_stats.min_wait,
+                    gate_stats.min_wait_detail,
                 );
                 anyhow::bail!(
                     "所有凭据均无法获取有效 Token（可用: {}/{}）",
@@ -1938,9 +1939,7 @@ impl MultiTokenManager {
                     &mut tried_ids,
                     false,
                     model_id,
-                    &mut min_wait,
-                    &mut min_wait_detail,
-                    &mut cooling_skipped,
+                    &mut gate_stats,
                 );
 
                 // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
@@ -1964,9 +1963,7 @@ impl MultiTokenManager {
                         &mut tried_ids,
                         false,
                         model_id,
-                        &mut min_wait,
-                        &mut min_wait_detail,
-                        &mut cooling_skipped,
+                        &mut gate_stats,
                     );
                 }
 
@@ -1978,6 +1975,10 @@ impl MultiTokenManager {
                         })
                         .count();
                     if available == 0 {
+                        let enabled = entries.iter().filter(|e| !e.disabled).count();
+                        if enabled == 0 {
+                            anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
+                        }
                         if let Some(model_id) = model_id
                             && !free_subscription_supports_model(model_id)
                         {
@@ -1992,7 +1993,7 @@ impl MultiTokenManager {
                             total
                         );
                     }
-                    if min_wait.is_none() {
+                    if gate_stats.min_wait.is_none() {
                         anyhow::bail!(
                             "所有可用凭据均已尝试（可用: {}/{}，已尝试: {}/{}）",
                             available,
@@ -2039,12 +2040,13 @@ impl MultiTokenManager {
                     wait_ms = %wait.as_millis(),
                     "凭据触发速率限制，跳过"
                 );
-                if min_wait.map(|w| wait < w).unwrap_or(true) {
-                    min_wait_detail = Some((id, "rate_limit", wait));
+                if gate_stats.min_wait.map(|w| wait < w).unwrap_or(true) {
+                    gate_stats.min_wait_detail = Some((id, "rate_limit", wait));
                 }
-                min_wait = Some(min_wait.map(|w| w.min(wait)).unwrap_or(wait));
+                gate_stats.min_wait =
+                    Some(gate_stats.min_wait.map(|w| w.min(wait)).unwrap_or(wait));
                 tried_ids.push(id);
-                cooling_skipped += 1;
+                gate_stats.cooling_skipped += 1;
                 continue;
             }
 
@@ -2476,8 +2478,11 @@ impl MultiTokenManager {
                                 let (has_available, recorded_failure) = {
                                     let mut entries = self.entries.lock();
                                     let mut should_cooldown = false;
-                                    let recorded_failure = if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                                        let count = entry.record_refresh_failure(Some(&err.to_string()));
+                                    let recorded_failure = if let Some(entry) =
+                                        entries.iter_mut().find(|e| e.id == id)
+                                    {
+                                        let count =
+                                            entry.record_refresh_failure(Some(&err.to_string()));
                                         should_cooldown =
                                             count < MAX_FAILURES_PER_CREDENTIAL && !entry.disabled;
                                         true

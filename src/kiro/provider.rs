@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-#[cfg(not(feature = "sensitive-logs"))]
 use crate::common::utf8::floor_char_boundary;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::endpoint::{
@@ -1228,7 +1227,6 @@ impl KiroProvider {
     /// 目标：
     /// - 保留关键错误信息（例如 "Input is too long" / "Improperly formed request"）
     /// - 避免返回过长/不可控的内容导致客户端难以区分或处理
-    #[cfg(not(feature = "sensitive-logs"))]
     fn summarize_error_body(body: &str) -> String {
         const MAX_LEN: usize = 256;
         let trimmed = body.trim();
@@ -1268,7 +1266,6 @@ impl KiroProvider {
         Self::truncate_one_line(trimmed, MAX_LEN)
     }
 
-    #[cfg(not(feature = "sensitive-logs"))]
     fn truncate_one_line(s: &str, max_len: usize) -> String {
         let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
         if one_line.len() <= max_len {
