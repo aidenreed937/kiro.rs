@@ -18,7 +18,7 @@ struct Asset;
 pub fn create_admin_ui_router() -> Router {
     Router::new()
         .route("/", get(index_handler))
-        .route("/{*file}", get(static_handler))
+        .fallback(get(static_handler))
 }
 
 /// 处理首页请求

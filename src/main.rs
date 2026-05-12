@@ -11,6 +11,7 @@ pub mod token;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::{response::Redirect, routing::get};
 use clap::Parser;
 use kiro::endpoint::{CliEndpoint, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
@@ -235,6 +236,7 @@ async fn main() {
                 tracing::info!("Admin API 已启用");
                 tracing::info!("Admin UI 已启用: /admin");
                 anthropic_app
+                    .route("/admin/", get(|| async { Redirect::temporary("/admin") }))
                     .nest("/api/admin", admin_app)
                     .nest("/admin", admin_ui_app)
             }

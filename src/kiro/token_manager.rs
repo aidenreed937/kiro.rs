@@ -3413,19 +3413,30 @@ impl MultiTokenManager {
         match get_usage_limits(&credentials, &config, &token, proxy.as_ref()).await {
             Ok(usage) => {
                 let mut should_persist = false;
-                if let Some(subscription_title) = usage.subscription_title() {
+                let email = usage.email().map(str::to_string);
+                if usage.subscription_title().is_some() || email.is_some() {
                     let mut entries = self.entries.lock();
-                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id)
-                        && entry.credentials.subscription_title.as_deref()
-                            != Some(subscription_title)
-                    {
-                        entry.credentials.subscription_title = Some(subscription_title.to_string());
-                        should_persist = true;
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                        if let Some(subscription_title) = usage.subscription_title()
+                            && entry.credentials.subscription_title.as_deref()
+                                != Some(subscription_title)
+                        {
+                            entry.credentials.subscription_title =
+                                Some(subscription_title.to_string());
+                            should_persist = true;
+                        }
+
+                        if let Some(email) = email.as_deref()
+                            && entry.credentials.email.as_deref() != Some(email)
+                        {
+                            entry.credentials.email = Some(email.to_string());
+                            should_persist = true;
+                        }
                     }
                 }
 
                 if should_persist && let Err(e) = self.persist_credentials() {
-                    tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
+                    tracing::warn!("账号信息更新后持久化失败（不影响本次请求）: {}", e);
                 }
 
                 Ok(usage)
@@ -3488,6 +3499,9 @@ impl MultiTokenManager {
             cred.access_token = None;
             cred.expires_at = None;
             cred.subscription_title = usage.subscription_title().map(|s| s.to_string());
+            if let Some(email) = usage.email() {
+                cred.email = Some(email.to_string());
+            }
             cred
         } else {
             refresh_token(&new_cred, &config, proxy.as_ref()).await?
@@ -3508,7 +3522,7 @@ impl MultiTokenManager {
         validated_cred.client_secret = new_cred.client_secret;
         validated_cred.region = new_cred.region;
         validated_cred.machine_id = new_cred.machine_id;
-        validated_cred.email = new_cred.email;
+        validated_cred.email = new_cred.email.or(validated_cred.email);
         validated_cred.api_region = new_cred.api_region;
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;

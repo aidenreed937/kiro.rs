@@ -13,6 +13,10 @@ pub struct UsageLimitsResponse {
     #[allow(dead_code)]
     pub next_date_reset: Option<f64>,
 
+    /// 用户信息（部分 endpoint 会返回，用于 Admin UI 区分多账号）
+    #[serde(default)]
+    pub user_info: Option<UsageUserInfo>,
+
     /// 订阅信息
     #[serde(default)]
     pub subscription_info: Option<SubscriptionInfo>,
@@ -29,6 +33,20 @@ pub struct SubscriptionInfo {
     /// 订阅标题 (KIRO PRO+ / KIRO FREE 等)
     #[serde(default)]
     pub subscription_title: Option<String>,
+}
+
+/// 用户信息
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUserInfo {
+    /// 账号邮箱
+    #[serde(default)]
+    pub email: Option<String>,
+
+    /// 用户 ID
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub user_id: Option<String>,
 }
 
 /// 使用量明细
@@ -139,6 +157,15 @@ impl FreeTrialInfo {
 }
 
 impl UsageLimitsResponse {
+    /// 获取账号邮箱
+    pub fn email(&self) -> Option<&str> {
+        self.user_info
+            .as_ref()
+            .and_then(|info| info.email.as_deref())
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+    }
+
     /// 获取订阅标题
     pub fn subscription_title(&self) -> Option<&str> {
         self.subscription_info

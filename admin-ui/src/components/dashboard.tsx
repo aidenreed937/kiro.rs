@@ -627,8 +627,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
         {/* 凭据列表 */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-3">
               <h2 className="text-xl font-semibold">凭据管理</h2>
               {/* 排序控件 */}
               <div className="flex items-center gap-1">
@@ -665,7 +665,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 </div>
               )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {selectedIds.size > 0 && (
                 <>
                   <Button onClick={handleBatchVerify} size="sm" variant="outline">
