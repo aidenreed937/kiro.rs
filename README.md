@@ -186,6 +186,7 @@ docker-compose up
 | `proxyUsername` | string | - | 代理用户名 |
 | `proxyPassword` | string | - | 代理密码 |
 | `adminApiKey` | string | - | Admin API 密钥，配置后启用凭据管理 API 和 Web 管理界面 |
+| `kamTokenJsonPath` | string | - | Kiro Account Manager 导出的 token JSON 路径；Admin 导入可留空使用该路径，也可在请求中临时覆盖 |
 | `credentialRpm` | number | - | 单凭据目标 RPM（每分钟请求数），用于凭据级节流/分流；`0` 或未配置表示使用内置默认策略 |
 | `promptCacheTtlSeconds` | number | `300` | 本地 Prompt Cache TTL（秒） |
 | `promptCacheAccountingEnabled` | boolean | `true` | 是否启用本地 Prompt Cache usage 记账；关闭后不再输出或扣减 cache token |
@@ -213,6 +214,7 @@ docker-compose up
    "proxyUsername": "user",
    "proxyPassword": "pass",
    "adminApiKey": "sk-admin-your-secret-key",
+   "kamTokenJsonPath": "/path/to/kam-token.json",
    "credentialRpm": 5,
    "promptCacheTtlSeconds": 300,
    "promptCacheAccountingEnabled": true,
@@ -443,6 +445,8 @@ RUST_LOG=debug ./target/release/kiro-rs
 - **Admin API（认证同 API Key）**
   - `GET /api/admin/credentials` - 获取所有凭据状态
   - `POST /api/admin/credentials` - 添加新凭据
+  - `POST /api/admin/credentials/import-token-json` - 从请求体导入 token JSON
+  - `POST /api/admin/credentials/import-token-json/from-path` - 从服务端配置路径或请求 path 导入 KAM token JSON
   - `DELETE /api/admin/credentials/:id` - 删除凭据
   - `POST /api/admin/credentials/:id/disabled` - 设置凭据禁用状态
   - `POST /api/admin/credentials/:id/priority` - 设置凭据优先级

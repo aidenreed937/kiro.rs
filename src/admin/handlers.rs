@@ -9,8 +9,9 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest, SetEndpointRequest,
-        SetPriorityRequest, SetRegionRequest, SuccessResponse, UpdateProxyConfigRequest,
+        AddCredentialRequest, ImportTokenJsonFromPathRequest, ImportTokenJsonRequest,
+        SetDisabledRequest, SetEndpointRequest, SetPriorityRequest, SetRegionRequest,
+        SuccessResponse, UpdateProxyConfigRequest,
     },
 };
 
@@ -169,6 +170,18 @@ pub async fn import_token_json(
 ) -> impl IntoResponse {
     let response = state.service.import_token_json(payload).await;
     Json(response)
+}
+
+/// POST /api/admin/credentials/import-token-json/from-path
+/// 从服务端路径批量导入 token.json
+pub async fn import_token_json_from_path(
+    State(state): State<AdminState>,
+    Json(payload): Json<ImportTokenJsonFromPathRequest>,
+) -> impl IntoResponse {
+    match state.service.import_token_json_from_path(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }
 
 /// GET /proxy - 获取全局代理配置

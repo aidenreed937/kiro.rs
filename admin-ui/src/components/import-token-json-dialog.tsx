@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
-import { Upload, FileJson, CheckCircle2, XCircle, AlertCircle, Loader2 } from 'lucide-react'
+import { Upload, FileJson, CheckCircle2, XCircle, AlertCircle, Loader2, FolderOpen } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -10,11 +10,17 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-import { useImportTokenJson, useDeleteCredential } from '@/hooks/use-credentials'
+import {
+  useGlobalConfig,
+  useImportTokenJson,
+  useImportTokenJsonFromPath,
+  useDeleteCredential,
+} from '@/hooks/use-credentials'
 import { getCredentialBalance, setCredentialDisabled } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { TokenJsonItem, ImportItemResult, ImportSummary } from '@/types/api'
+import type { TokenJsonItem, ImportItemResult, ImportSummary, ImportTokenJsonResponse } from '@/types/api'
 
 interface ImportTokenJsonDialogProps {
   open: boolean
@@ -36,9 +42,12 @@ interface VerifyItemResult {
 export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDialogProps) {
   const [step, setStep] = useState<Step>('input')
   const [jsonText, setJsonText] = useState('')
+  const [serverPath, setServerPath] = useState('')
   const [parsedItems, setParsedItems] = useState<TokenJsonItem[]>([])
   const [previewResults, setPreviewResults] = useState<ImportItemResult[]>([])
   const [previewSummary, setPreviewSummary] = useState<ImportSummary | null>(null)
+  const [previewSource, setPreviewSource] = useState<'payload' | 'path'>('payload')
+  const [previewServerPath, setPreviewServerPath] = useState<string | undefined>(undefined)
   const [finalResults, setFinalResults] = useState<ImportItemResult[]>([])
   const [finalSummary, setFinalSummary] = useState<ImportSummary | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -49,14 +58,21 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { mutate: importMutate, isPending } = useImportTokenJson()
+  const { mutate: importFromPathMutate, isPending: isPathPending } = useImportTokenJsonFromPath()
+  const { data: globalConfig } = useGlobalConfig()
   const { mutateAsync: deleteCredential } = useDeleteCredential()
+  const importPending = isPending || isPathPending
+  const hasServerImportPath = Boolean(serverPath.trim() || globalConfig?.kamTokenJsonPath)
 
   const resetState = useCallback(() => {
     setStep('input')
     setJsonText('')
+    setServerPath('')
     setParsedItems([])
     setPreviewResults([])
     setPreviewSummary(null)
+    setPreviewSource('payload')
+    setPreviewServerPath(undefined)
     setFinalResults([])
     setFinalSummary(null)
     setEnableVerify(false)
@@ -83,9 +99,14 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
         : typeof obj.label === 'string'
           ? obj.label
           : undefined
+      const email = typeof obj.email === 'string'
+        ? obj.email
+        : typeof obj.accountEmail === 'string'
+          ? obj.accountEmail
+          : undefined
 
       return {
-        email: typeof obj.email === 'string' ? obj.email : undefined,
+        email,
         userId:
           typeof obj.userId === 'string' || obj.userId === null
             ? obj.userId
@@ -98,6 +119,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
           clientId: typeof obj.clientId === 'string' ? obj.clientId : undefined,
           clientSecret: typeof obj.clientSecret === 'string' ? obj.clientSecret : undefined,
           region: typeof obj.region === 'string' ? obj.region : undefined,
+          apiRegion: typeof obj.apiRegion === 'string' ? obj.apiRegion : undefined,
           authMethod: typeof obj.authMethod === 'string' ? obj.authMethod : undefined,
           startUrl: typeof obj.startUrl === 'string' ? obj.startUrl : undefined,
         },
@@ -116,13 +138,20 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     // 跳过 error 状态的账号
     if (account.status === 'error') return null
     const authMethod = cred.authMethod as string | undefined
+    const email = typeof account.email === 'string'
+      ? account.email.trim()
+      : typeof account.accountEmail === 'string'
+        ? account.accountEmail.trim()
+        : undefined
     return {
       refreshToken: cred.refreshToken.trim(),
       clientId: cred.clientId as string | undefined,
       clientSecret: cred.clientSecret as string | undefined,
       authMethod: (!authMethod && cred.clientId && cred.clientSecret) ? 'idc' : authMethod,
       region: cred.region as string | undefined,
+      apiRegion: cred.apiRegion as string | undefined,
       machineId: account.machineId as string | undefined,
+      email: email || undefined,
     }
   }, [])
 
@@ -161,6 +190,11 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
         // 扁平格式：{ refreshToken, ... }
         if (typeof obj.refreshToken === 'string' && obj.refreshToken.trim()) {
           const tokenItem = { ...obj, refreshToken: obj.refreshToken.trim() } as TokenJsonItem
+          if (typeof obj.email === 'string') {
+            tokenItem.email = obj.email.trim() || undefined
+          } else if (typeof obj.accountEmail === 'string') {
+            tokenItem.email = obj.accountEmail.trim() || undefined
+          }
           // 兼容旧批量导入的 authRegion 字段
           if (!tokenItem.region && obj.authRegion) {
             tokenItem.region = obj.authRegion as string
@@ -243,6 +277,8 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     const items = parseJson(jsonText)
     if (!items) return
     setParsedItems(items)
+    setPreviewSource('payload')
+    setPreviewServerPath(undefined)
     importMutate(
       { dryRun: true, items },
       {
@@ -257,6 +293,26 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       }
     )
   }, [jsonText, parseJson, importMutate])
+
+  const handlePathPreview = useCallback(() => {
+    const path = serverPath.trim() || undefined
+    importFromPathMutate(
+      { dryRun: true, path },
+      {
+        onSuccess: (response) => {
+          setParsedItems([])
+          setPreviewResults(response.items)
+          setPreviewSummary(response.summary)
+          setPreviewSource('path')
+          setPreviewServerPath(path)
+          setStep('preview')
+        },
+        onError: (error) => {
+          toast.error(`路径预览失败: ${extractErrorMessage(error)}`)
+        },
+      }
+    )
+  }, [serverPath, importFromPathMutate])
 
   // 回滚凭据（禁用 + 删除）
   const rollbackCredential = async (id: number): Promise<{ success: boolean; error?: string }> => {
@@ -337,39 +393,56 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     }
   }, [deleteCredential])
 
+  const handleImportSuccess = useCallback((response: ImportTokenJsonResponse) => {
+    setFinalResults(response.items)
+    setFinalSummary(response.summary)
+
+    if (enableVerify) {
+      // 开启验活模式：导入后自动验活
+      if (response.summary.added > 0) {
+        toast.success(`成功导入 ${response.summary.added} 个凭据，开始验活...`)
+        runVerification(response.items)
+      } else {
+        // 没有新增凭据，直接显示结果
+        setStep('result')
+        toast.info('没有新增凭据需要验活')
+      }
+    } else {
+      // 普通模式：直接显示结果
+      setStep('result')
+      if (response.summary.added > 0) {
+        toast.success(`成功导入 ${response.summary.added} 个凭据`)
+      }
+    }
+  }, [enableVerify, runVerification])
+
   // 确认导入
   const handleConfirmImport = useCallback(() => {
+    const onError = (error: unknown) => {
+      toast.error(`导入失败: ${extractErrorMessage(error)}`)
+    }
+
+    if (previewSource === 'path') {
+      importFromPathMutate(
+        { dryRun: false, smokeCheck: enableVerify, path: previewServerPath },
+        { onSuccess: handleImportSuccess, onError }
+      )
+      return
+    }
+
     importMutate(
       { dryRun: false, smokeCheck: enableVerify, items: parsedItems },
-      {
-        onSuccess: (response) => {
-          setFinalResults(response.items)
-          setFinalSummary(response.summary)
-
-          if (enableVerify) {
-            // 开启验活模式：导入后自动验活
-            if (response.summary.added > 0) {
-              toast.success(`成功导入 ${response.summary.added} 个凭据，开始验活...`)
-              runVerification(response.items)
-            } else {
-              // 没有新增凭据，直接显示结果
-              setStep('result')
-              toast.info('没有新增凭据需要验活')
-            }
-          } else {
-            // 普通模式：直接显示结果
-            setStep('result')
-            if (response.summary.added > 0) {
-              toast.success(`成功导入 ${response.summary.added} 个凭据`)
-            }
-          }
-        },
-        onError: (error) => {
-          toast.error(`导入失败: ${extractErrorMessage(error)}`)
-        },
-      }
+      { onSuccess: handleImportSuccess, onError }
     )
-  }, [parsedItems, importMutate, enableVerify, runVerification])
+  }, [
+    parsedItems,
+    importMutate,
+    importFromPathMutate,
+    enableVerify,
+    previewSource,
+    previewServerPath,
+    handleImportSuccess,
+  ])
 
   // 渲染图标
   const renderActionIcon = (action: string) => {
@@ -413,6 +486,10 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       case 'skipped': return '跳过'
     }
   }
+
+  const getItemEmail = (item: ImportItemResult) =>
+    parsedItems[item.index]?.email?.trim() || item.email?.trim() || ''
+  const confirmableCount = (previewSummary?.added ?? 0) + (previewSummary?.skipped ?? 0)
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -461,6 +538,39 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
                   className="hidden"
                   onChange={handleFileSelect}
                 />
+              </div>
+
+              <div className="space-y-3 rounded-lg border p-3">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                  <div className="text-sm font-medium">从服务端路径导入</div>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder={globalConfig?.kamTokenJsonPath ? `留空使用 ${globalConfig.kamTokenJsonPath}` : '/path/to/kam-token.json'}
+                    value={serverPath}
+                    onChange={(e) => setServerPath(e.target.value)}
+                    disabled={importPending}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handlePathPreview}
+                    disabled={importPending || !hasServerImportPath}
+                  >
+                    {isPathPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        读取中...
+                      </>
+                    ) : (
+                      '预览'
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  留空使用全局配置 kamTokenJsonPath，填写后仅本次导入覆盖
+                </p>
               </div>
 
               {/* 分隔线 */}
@@ -525,7 +635,12 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
                       {previewResults.map((item) => (
                         <tr key={item.index} className="border-t">
                           <td className="p-2">{item.index + 1}</td>
-                          <td className="p-2 font-mono text-xs">{item.fingerprint}</td>
+                          <td className="p-2">
+                            <div className="font-mono text-xs">{item.fingerprint}</div>
+                            {getItemEmail(item) && (
+                              <div className="text-xs text-muted-foreground">{getItemEmail(item)}</div>
+                            )}
+                          </td>
                           <td className="p-2">
                             <div className="flex items-center gap-1">
                               {renderActionIcon(item.action)}
@@ -594,7 +709,12 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
                       {finalResults.map((item) => (
                         <tr key={item.index} className="border-t">
                           <td className="p-2">{item.index + 1}</td>
-                          <td className="p-2 font-mono text-xs">{item.fingerprint}</td>
+                          <td className="p-2">
+                            <div className="font-mono text-xs">{item.fingerprint}</div>
+                            {getItemEmail(item) && (
+                              <div className="text-xs text-muted-foreground">{getItemEmail(item)}</div>
+                            )}
+                          </td>
                           <td className="p-2">
                             <div className="flex items-center gap-1">
                               {renderActionIcon(item.action)}
@@ -688,7 +808,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
               <Button variant="outline" onClick={handleClose}>
                 取消
               </Button>
-              <Button onClick={handlePreview} disabled={!jsonText.trim() || isPending}>
+              <Button onClick={handlePreview} disabled={!jsonText.trim() || importPending}>
                 {isPending ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -708,17 +828,17 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
               </Button>
               <Button
                 onClick={handleConfirmImport}
-                disabled={isPending || (previewSummary?.added ?? 0) === 0}
+                disabled={importPending || confirmableCount === 0}
               >
-                {isPending ? (
+                {importPending ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                     导入中...
                   </>
-                ) : enableVerify ? (
+                ) : enableVerify && (previewSummary?.added ?? 0) > 0 ? (
                   `导入并验活 (${previewSummary?.added ?? 0})`
                 ) : (
-                  `确认导入 (${previewSummary?.added ?? 0})`
+                  `确认处理 (${confirmableCount})`
                 )}
               </Button>
             </>

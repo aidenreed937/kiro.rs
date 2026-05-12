@@ -275,8 +275,11 @@ pub struct TokenJsonItem {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub auth_method: Option<String>,
+    #[serde(alias = "accountEmail")]
+    pub email: Option<String>,
     #[serde(default)]
     pub priority: u32,
+    #[serde(alias = "authRegion")]
     pub region: Option<String>,
     pub api_region: Option<String>,
     pub machine_id: Option<String>,
@@ -292,6 +295,19 @@ pub struct ImportTokenJsonRequest {
     #[serde(default)]
     pub smoke_check: bool,
     pub items: ImportItems,
+}
+
+/// 从服务端路径导入 token.json 请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTokenJsonFromPathRequest {
+    /// 可选路径；留空时使用全局配置 kamTokenJsonPath
+    pub path: Option<String>,
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// 导入时发送最小消息验活，失败的凭据不会保留
+    #[serde(default)]
+    pub smoke_check: bool,
 }
 
 fn default_dry_run() -> bool {
@@ -339,6 +355,8 @@ pub struct ImportSummary {
 pub struct ImportItemResult {
     pub index: usize,
     pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub action: ImportAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -417,6 +435,8 @@ pub struct GlobalConfigResponse {
     pub default_endpoint: String,
     /// Kiro 服务端点域名族
     pub service_endpoint_family: ServiceEndpointFamily,
+    /// Kiro Account Manager 导出的 token JSON 路径
+    pub kam_token_json_path: Option<String>,
     /// 压缩配置
     pub compression: CompressionConfigResponse,
 }
@@ -454,6 +474,8 @@ pub struct UpdateGlobalConfigRequest {
     pub default_endpoint: Option<String>,
     /// Kiro 服务端点域名族（可选）
     pub service_endpoint_family: Option<ServiceEndpointFamily>,
+    /// Kiro Account Manager 导出的 token JSON 路径（可选；空字符串清空）
+    pub kam_token_json_path: Option<Option<String>>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
 }

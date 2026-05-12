@@ -6,6 +6,7 @@
   "defaultEndpoint": "ide",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
+  "kamTokenJsonPath": "/path/to/kam-token.json",
   "credentialRpm": 5,
   "promptCacheTtlSeconds": 300,
   "promptCacheAccountingEnabled": true,

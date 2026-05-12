@@ -13,6 +13,7 @@ import type {
   CredentialStatsResponse,
   CredentialAccountInfoResponse,
   ImportTokenJsonRequest,
+  ImportTokenJsonFromPathRequest,
   ImportTokenJsonResponse,
   ProxyConfigResponse,
   UpdateProxyConfigRequest,
@@ -164,6 +165,17 @@ export async function importTokenJson(
 ): Promise<ImportTokenJsonResponse> {
   const { data } = await api.post<ImportTokenJsonResponse>(
     '/credentials/import-token-json',
+    req
+  )
+  return data
+}
+
+// 从服务端路径批量导入 token.json
+export async function importTokenJsonFromPath(
+  req: ImportTokenJsonFromPathRequest
+): Promise<ImportTokenJsonResponse> {
+  const { data } = await api.post<ImportTokenJsonResponse>(
+    '/credentials/import-token-json/from-path',
     req
   )
   return data

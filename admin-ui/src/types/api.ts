@@ -200,6 +200,7 @@ export interface AddCredentialRequest {
   apiRegion?: string
   machineId?: string
   endpoint?: string
+  email?: string
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
@@ -344,8 +345,10 @@ export interface TokenJsonItem {
   clientId?: string
   clientSecret?: string
   authMethod?: string
+  email?: string
   priority?: number
   region?: string
+  apiRegion?: string
   machineId?: string
 }
 
@@ -356,6 +359,13 @@ export interface ImportTokenJsonRequest {
   items: TokenJsonItem | TokenJsonItem[]
 }
 
+// 从服务端路径导入请求
+export interface ImportTokenJsonFromPathRequest {
+  path?: string
+  dryRun?: boolean
+  smokeCheck?: boolean
+}
+
 // 导入动作
 export type ImportAction = 'added' | 'skipped' | 'invalid'
 
@@ -363,6 +373,7 @@ export type ImportAction = 'added' | 'skipped' | 'invalid'
 export interface ImportItemResult {
   index: number
   fingerprint: string
+  email?: string
   action: ImportAction
   reason?: string
   credentialId?: number
@@ -418,6 +429,7 @@ export interface GlobalConfigResponse {
   promptCacheAccountingEnabled: boolean
   defaultEndpoint: string
   serviceEndpointFamily: 'legacy' | 'kiro'
+  kamTokenJsonPath: string | null
   compression: CompressionConfigResponse
 }
 
@@ -442,5 +454,6 @@ export interface UpdateGlobalConfigRequest {
   promptCacheAccountingEnabled?: boolean
   defaultEndpoint?: string
   serviceEndpointFamily?: 'legacy' | 'kiro'
+  kamTokenJsonPath?: string | null
   compression?: UpdateCompressionConfigRequest
 }

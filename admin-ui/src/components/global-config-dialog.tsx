@@ -35,6 +35,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] = useState(true)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
   const [serviceEndpointFamily, setServiceEndpointFamily] = useState<'legacy' | 'kiro'>('legacy')
+  const [kamTokenJsonPath, setKamTokenJsonPath] = useState('')
 
   // 代理设置
   const [proxyUrl, setProxyUrl] = useState('')
@@ -65,6 +66,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
       setDefaultEndpoint(globalConfig.defaultEndpoint || 'ide')
       setServiceEndpointFamily(globalConfig.serviceEndpointFamily || 'legacy')
+      setKamTokenJsonPath(globalConfig.kamTokenJsonPath || '')
       const c = globalConfig.compression
       setCEnabled(c.enabled)
       setCWhitespace(c.whitespaceCompression)
@@ -120,6 +122,12 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
 
     if (serviceEndpointFamily !== (globalConfig?.serviceEndpointFamily || 'legacy')) {
       globalPayload.serviceEndpointFamily = serviceEndpointFamily
+      hasGlobalChanges = true
+    }
+
+    const newKamTokenJsonPath = kamTokenJsonPath.trim() || null
+    if (newKamTokenJsonPath !== (globalConfig?.kamTokenJsonPath || null)) {
+      globalPayload.kamTokenJsonPath = newKamTokenJsonPath
       hasGlobalChanges = true
     }
 
@@ -262,6 +270,17 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
                   <option value="kiro">kiro: *.&lt;region&gt;.kiro.dev</option>
                 </select>
                 <p className="text-xs text-muted-foreground">legacy 保持旧行为；kiro 使用 runtime/management 官方域名</p>
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="gcKamTokenJsonPath" className="text-sm font-medium">KAM token JSON 路径</label>
+                <Input
+                  id="gcKamTokenJsonPath"
+                  placeholder="/path/to/kiro-account-manager.json"
+                  value={kamTokenJsonPath}
+                  onChange={(e) => setKamTokenJsonPath(e.target.value)}
+                  disabled={isPending}
+                />
+                <p className="text-xs text-muted-foreground">用于导入弹窗从服务端文件读取；留空则导入时必须手动填路径</p>
               </div>
             </div>
 

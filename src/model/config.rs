@@ -119,6 +119,12 @@ pub struct Config {
     #[serde(default)]
     pub service_endpoint_family: ServiceEndpointFamily,
 
+    /// Kiro Account Manager 导出的 token JSON 路径（可选）
+    ///
+    /// 用于 Admin API 从服务端文件系统导入凭据；不配置时必须在请求中显式传入路径。
+    #[serde(default)]
+    pub kam_token_json_path: Option<String>,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -325,6 +331,7 @@ impl Default for Config {
             prompt_cache_accounting_enabled: default_true(),
             default_endpoint: default_endpoint(),
             service_endpoint_family: ServiceEndpointFamily::default(),
+            kam_token_json_path: None,
             config_path: None,
         }
     }

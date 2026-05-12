@@ -3615,20 +3615,65 @@ impl MultiTokenManager {
     /// 用于批量导入时的去重检查，通过比较 refreshToken 前 32 字符判断是否重复
     /// 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
     pub fn has_refresh_token_prefix(&self, refresh_token: &str) -> bool {
+        self.credential_id_by_refresh_token_prefix(refresh_token)
+            .is_some()
+    }
+
+    pub fn credential_id_by_refresh_token_prefix(&self, refresh_token: &str) -> Option<u64> {
         let prefix_len = floor_char_boundary(refresh_token, 32);
         let new_prefix = &refresh_token[..prefix_len];
 
         let entries = self.entries.lock();
-        entries.iter().any(|e| {
-            e.credentials
-                .refresh_token
-                .as_ref()
-                .map(|rt| {
-                    let existing_prefix_len = floor_char_boundary(rt, 32);
-                    &rt[..existing_prefix_len] == new_prefix
-                })
-                .unwrap_or(false)
+        entries.iter().find_map(|e| {
+            e.credentials.refresh_token.as_ref().and_then(|rt| {
+                let existing_prefix_len = floor_char_boundary(rt, 32);
+                (&rt[..existing_prefix_len] == new_prefix).then_some(e.id)
+            })
         })
+    }
+
+    pub fn update_email_by_refresh_token_prefix(
+        &self,
+        refresh_token: &str,
+        email: Option<String>,
+    ) -> anyhow::Result<Option<(u64, bool)>> {
+        let email = email
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let prefix_len = floor_char_boundary(refresh_token, 32);
+        let new_prefix = &refresh_token[..prefix_len];
+
+        let (matched_id, changed) = {
+            let mut entries = self.entries.lock();
+            let Some(entry) = entries.iter_mut().find(|e| {
+                e.credentials
+                    .refresh_token
+                    .as_ref()
+                    .map(|rt| {
+                        let existing_prefix_len = floor_char_boundary(rt, 32);
+                        &rt[..existing_prefix_len] == new_prefix
+                    })
+                    .unwrap_or(false)
+            }) else {
+                return Ok(None);
+            };
+
+            let mut changed = false;
+            if let Some(email) = email
+                && entry.credentials.email.as_deref() != Some(email.as_str())
+            {
+                entry.credentials.email = Some(email);
+                changed = true;
+            }
+
+            (entry.id, changed)
+        };
+
+        if changed {
+            self.persist_credentials()?;
+        }
+
+        Ok(Some((matched_id, changed)))
     }
 
     // ========================================================================

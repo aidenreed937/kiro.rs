@@ -1,12 +1,14 @@
 //! Admin API 业务逻辑服务
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::anthropic::PromptCacheRuntime;
 use crate::common::utf8::floor_char_boundary;
@@ -21,8 +23,8 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
     CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
-    ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
-    ProxyConfigResponse, TokenJsonItem, UpdateProxyConfigRequest,
+    ImportItemResult, ImportSummary, ImportTokenJsonFromPathRequest, ImportTokenJsonRequest,
+    ImportTokenJsonResponse, ProxyConfigResponse, TokenJsonItem, UpdateProxyConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -604,6 +606,185 @@ impl AdminService {
         }
     }
 
+    /// 从服务端路径读取并导入 KAM token JSON。
+    ///
+    /// 请求中的 path 优先；未传或为空时使用全局配置 kamTokenJsonPath。
+    pub async fn import_token_json_from_path(
+        &self,
+        req: ImportTokenJsonFromPathRequest,
+    ) -> Result<ImportTokenJsonResponse, AdminServiceError> {
+        let path = self.resolve_kam_token_json_path(req.path)?;
+        let content = fs::read_to_string(&path).map_err(|e| {
+            AdminServiceError::InvalidRequest(format!(
+                "读取 KAM token JSON 失败: {} ({})",
+                path.display(),
+                e
+            ))
+        })?;
+        let items = Self::parse_token_json_items_from_str(&content)?;
+
+        Ok(self
+            .import_token_json(ImportTokenJsonRequest {
+                dry_run: req.dry_run,
+                smoke_check: req.smoke_check,
+                items: super::types::ImportItems::Multiple(items),
+            })
+            .await)
+    }
+
+    fn resolve_kam_token_json_path(
+        &self,
+        request_path: Option<String>,
+    ) -> Result<PathBuf, AdminServiceError> {
+        let (configured_path, config_dir) = {
+            let config = self.config.read();
+            (
+                config.kam_token_json_path.clone(),
+                config
+                    .config_path()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf),
+            )
+        };
+
+        let raw_path = Self::normalize_optional_string(request_path)
+            .or_else(|| Self::normalize_optional_string(configured_path))
+            .ok_or_else(|| {
+                AdminServiceError::InvalidRequest(
+                    "未配置 KAM token JSON 路径，请设置 kamTokenJsonPath 或在请求中传入 path"
+                        .to_string(),
+                )
+            })?;
+
+        let path = PathBuf::from(raw_path);
+        if path.is_absolute() {
+            Ok(path)
+        } else if let Some(config_dir) = config_dir {
+            Ok(config_dir.join(path))
+        } else {
+            Ok(path)
+        }
+    }
+
+    fn parse_token_json_items_from_str(
+        content: &str,
+    ) -> Result<Vec<TokenJsonItem>, AdminServiceError> {
+        let value: Value = serde_json::from_str(content).map_err(|e| {
+            AdminServiceError::InvalidRequest(format!("KAM token JSON 解析失败: {}", e))
+        })?;
+
+        let raw_items = match value {
+            Value::Array(items) => items,
+            Value::Object(obj) => {
+                if let Some(Value::Array(accounts)) = obj.get("accounts") {
+                    accounts.clone()
+                } else {
+                    vec![Value::Object(obj)]
+                }
+            }
+            _ => {
+                return Err(AdminServiceError::InvalidRequest(
+                    "KAM token JSON 必须是对象或数组".to_string(),
+                ));
+            }
+        };
+
+        let mut items = Vec::new();
+        for raw in raw_items {
+            if let Some(item) = Self::parse_token_json_value(raw)? {
+                items.push(item);
+            }
+        }
+
+        if items.is_empty() {
+            return Err(AdminServiceError::InvalidRequest(
+                "KAM token JSON 中没有找到可导入的凭据".to_string(),
+            ));
+        }
+
+        Ok(items)
+    }
+
+    fn parse_token_json_value(value: Value) -> Result<Option<TokenJsonItem>, AdminServiceError> {
+        let Value::Object(obj) = value else {
+            return Ok(None);
+        };
+
+        if Self::is_error_status(&obj) {
+            return Ok(None);
+        }
+
+        let value = if let Some(Value::Object(credentials)) = obj.get("credentials") {
+            Value::Object(Self::flatten_kam_account(&obj, credentials))
+        } else {
+            Value::Object(obj)
+        };
+
+        let mut item: TokenJsonItem = serde_json::from_value(value).map_err(|e| {
+            AdminServiceError::InvalidRequest(format!("KAM token JSON 字段格式无效: {}", e))
+        })?;
+
+        if item.auth_method.is_none() && item.client_id.is_some() && item.client_secret.is_some() {
+            item.auth_method = Some("idc".to_string());
+        }
+        item.email = Self::normalize_optional_string(item.email);
+        item.region = Self::normalize_optional_string(item.region);
+        item.api_region = Self::normalize_optional_string(item.api_region);
+        item.machine_id = Self::normalize_optional_string(item.machine_id);
+
+        Ok(Some(item))
+    }
+
+    fn flatten_kam_account(
+        account: &Map<String, Value>,
+        credentials: &Map<String, Value>,
+    ) -> Map<String, Value> {
+        let mut flat = credentials.clone();
+
+        Self::copy_json_field_if_missing(account, &mut flat, "provider");
+        Self::copy_json_field_if_missing(account, &mut flat, "priority");
+        Self::copy_json_field_if_missing(account, &mut flat, "machineId");
+        Self::copy_json_field_if_missing(account, &mut flat, "region");
+        Self::copy_json_field_if_missing(account, &mut flat, "apiRegion");
+        Self::copy_json_field_if_missing(account, &mut flat, "authMethod");
+
+        if !flat.contains_key("email") {
+            if let Some(value) = account.get("email") {
+                flat.insert("email".to_string(), value.clone());
+            } else if let Some(value) = account.get("accountEmail") {
+                flat.insert("email".to_string(), value.clone());
+            }
+        }
+
+        if !flat.contains_key("authMethod")
+            && flat.get("clientId").is_some()
+            && flat.get("clientSecret").is_some()
+        {
+            flat.insert("authMethod".to_string(), Value::String("idc".to_string()));
+        }
+
+        flat
+    }
+
+    fn copy_json_field_if_missing(
+        source: &Map<String, Value>,
+        target: &mut Map<String, Value>,
+        key: &str,
+    ) {
+        if target.contains_key(key) {
+            return;
+        }
+        if let Some(value) = source.get(key) {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
+
+    fn is_error_status(obj: &Map<String, Value>) -> bool {
+        obj.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+    }
+
     /// 处理单个 token.json 项
     async fn process_token_json_item(
         &self,
@@ -614,6 +795,7 @@ impl AdminService {
     ) -> ImportItemResult {
         // 生成指纹（用于识别和去重）
         let fingerprint = Self::generate_fingerprint(&item);
+        let email = Self::normalize_optional_string(item.email.clone());
 
         // 验证必填字段
         let refresh_token = match &item.refresh_token {
@@ -622,6 +804,7 @@ impl AdminService {
                 return ImportItemResult {
                     index,
                     fingerprint,
+                    email,
                     action: ImportAction::Invalid,
                     reason: Some("缺少 refreshToken".to_string()),
                     credential_id: None,
@@ -637,6 +820,7 @@ impl AdminService {
             return ImportItemResult {
                 index,
                 fingerprint,
+                email,
                 action: ImportAction::Invalid,
                 reason: Some(format!("{} 认证需要 clientId 和 clientSecret", auth_method)),
                 credential_id: None,
@@ -645,11 +829,58 @@ impl AdminService {
 
         // 检查是否已存在（通过 refreshToken 前缀匹配）
         if self.token_manager.has_refresh_token_prefix(&refresh_token) {
+            if !dry_run {
+                match self
+                    .token_manager
+                    .update_email_by_refresh_token_prefix(&refresh_token, email.clone())
+                {
+                    Ok(Some((credential_id, true))) => {
+                        return ImportItemResult {
+                            index,
+                            fingerprint,
+                            email,
+                            action: ImportAction::Skipped,
+                            reason: Some("凭据已存在，已更新邮箱".to_string()),
+                            credential_id: Some(credential_id),
+                        };
+                    }
+                    Ok(Some((credential_id, false))) => {
+                        return ImportItemResult {
+                            index,
+                            fingerprint,
+                            email,
+                            action: ImportAction::Skipped,
+                            reason: Some("凭据已存在".to_string()),
+                            credential_id: Some(credential_id),
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return ImportItemResult {
+                            index,
+                            fingerprint,
+                            email,
+                            action: ImportAction::Skipped,
+                            reason: Some(format!("凭据已存在，邮箱更新失败: {}", e)),
+                            credential_id: None,
+                        };
+                    }
+                }
+            }
+
             return ImportItemResult {
                 index,
                 fingerprint,
+                email: email.clone(),
                 action: ImportAction::Skipped,
-                reason: Some("凭据已存在".to_string()),
+                reason: Some(
+                    if email.is_some() {
+                        "凭据已存在，确认后可更新邮箱"
+                    } else {
+                        "凭据已存在"
+                    }
+                    .to_string(),
+                ),
                 credential_id: None,
             };
         }
@@ -659,6 +890,7 @@ impl AdminService {
             return ImportItemResult {
                 index,
                 fingerprint,
+                email,
                 action: ImportAction::Added,
                 reason: Some("预览模式".to_string()),
                 credential_id: None,
@@ -689,7 +921,7 @@ impl AdminService {
             api_region,
             machine_id: item.machine_id,
             endpoint: None,
-            email: None,
+            email: email.clone(),
             subscription_title: None,
             proxy_url: None,
             proxy_username: None,
@@ -707,6 +939,7 @@ impl AdminService {
                     return ImportItemResult {
                         index,
                         fingerprint,
+                        email,
                         action: ImportAction::Invalid,
                         reason: Some(e.to_string()),
                         credential_id: None,
@@ -716,6 +949,7 @@ impl AdminService {
                 ImportItemResult {
                     index,
                     fingerprint,
+                    email,
                     action: ImportAction::Added,
                     reason: smoke_check.then(|| "发消息验活通过".to_string()),
                     credential_id: Some(credential_id),
@@ -724,6 +958,7 @@ impl AdminService {
             Err(e) => ImportItemResult {
                 index,
                 fingerprint,
+                email,
                 action: ImportAction::Invalid,
                 reason: Some(e.to_string()),
                 credential_id: None,
@@ -810,6 +1045,12 @@ impl AdminService {
         "social".to_string()
     }
 
+    fn normalize_optional_string(value: Option<String>) -> Option<String> {
+        value
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// 获取当前代理配置（脱敏）
     pub fn get_proxy_config(&self) -> ProxyConfigResponse {
         let config = self.config.read();
@@ -887,6 +1128,7 @@ impl AdminService {
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
             default_endpoint: config.default_endpoint.clone(),
             service_endpoint_family: config.service_endpoint_family,
+            kam_token_json_path: config.kam_token_json_path.clone(),
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
                 whitespace_compression: c.whitespace_compression,
@@ -962,6 +1204,10 @@ impl AdminService {
 
             if let Some(family) = req.service_endpoint_family {
                 config.service_endpoint_family = family;
+            }
+
+            if let Some(path) = &req.kam_token_json_path {
+                config.kam_token_json_path = Self::normalize_optional_string(path.clone());
             }
 
             if let Some(c) = &req.compression {
@@ -1076,6 +1322,10 @@ mod tests {
     use std::fs;
 
     fn create_test_service() -> AdminService {
+        create_test_service_with_credentials(vec![KiroCredentials::default()])
+    }
+
+    fn create_test_service_with_credentials(credentials: Vec<KiroCredentials>) -> AdminService {
         let config_path = env::temp_dir().join(format!(
             "kiro-admin-service-test-{}-{}.json",
             std::process::id(),
@@ -1086,10 +1336,8 @@ mod tests {
         let compression_config = Arc::new(RwLock::new(CompressionConfig::default()));
         let prompt_cache_runtime = Arc::new(RwLock::new(PromptCacheRuntime::new(300, true)));
 
-        let credentials = KiroCredentials::default();
         let tm = Arc::new(
-            MultiTokenManager::new(config.read().clone(), vec![credentials], None, None, false)
-                .unwrap(),
+            MultiTokenManager::new(config.read().clone(), credentials, None, None, false).unwrap(),
         );
 
         let known_endpoints: HashSet<String> = vec!["ide".to_string(), "cli".to_string()]
@@ -1133,6 +1381,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("cli".to_string()),
             service_endpoint_family: None,
+            kam_token_json_path: None,
             compression: None,
         };
 
@@ -1158,6 +1407,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("".to_string()),
             service_endpoint_family: None,
+            kam_token_json_path: None,
             compression: None,
         };
 
@@ -1182,6 +1432,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("   ".to_string()),
             service_endpoint_family: None,
+            kam_token_json_path: None,
             compression: None,
         };
 
@@ -1206,6 +1457,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("unknown".to_string()),
             service_endpoint_family: None,
+            kam_token_json_path: None,
             compression: None,
         };
 
@@ -1227,6 +1479,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("  cli  ".to_string()),
             service_endpoint_family: None,
+            kam_token_json_path: None,
             compression: None,
         };
 
@@ -1246,6 +1499,201 @@ mod tests {
         let service = create_test_service();
         let config = service.get_global_config();
         assert_eq!(config.default_endpoint, "ide"); // Config::default() 的默认值
+        assert_eq!(config.kam_token_json_path, None);
+    }
+
+    #[tokio::test]
+    async fn test_import_token_json_backfills_email_for_existing_credential() {
+        let refresh_token = "r".repeat(150);
+        let existing = KiroCredentials {
+            refresh_token: Some(refresh_token.clone()),
+            auth_method: Some("idc".to_string()),
+            client_id: Some("client".to_string()),
+            client_secret: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let service = create_test_service_with_credentials(vec![existing]);
+
+        let req = super::super::types::ImportTokenJsonRequest {
+            dry_run: false,
+            smoke_check: false,
+            items: super::super::types::ImportItems::Single(super::super::types::TokenJsonItem {
+                provider: None,
+                refresh_token: Some(refresh_token),
+                client_id: Some("client".to_string()),
+                client_secret: Some("secret".to_string()),
+                auth_method: Some("idc".to_string()),
+                email: Some("  kam@example.com  ".to_string()),
+                priority: 0,
+                region: None,
+                api_region: None,
+                machine_id: None,
+            }),
+        };
+
+        let response = service.import_token_json(req).await;
+
+        assert_eq!(response.summary.added, 0);
+        assert_eq!(response.summary.skipped, 1);
+        assert_eq!(
+            response.items[0].action,
+            super::super::types::ImportAction::Skipped
+        );
+        assert_eq!(response.items[0].credential_id, Some(1));
+        assert_eq!(
+            response.items[0].reason.as_deref(),
+            Some("凭据已存在，已更新邮箱")
+        );
+
+        let credentials = service.get_all_credentials();
+        assert_eq!(
+            credentials.credentials[0].email.as_deref(),
+            Some("kam@example.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_kam_nested_account_json() {
+        let content = r#"
+        {
+          "version": "1.8.3",
+          "accounts": [
+            {
+              "accountEmail": "kam-user@example.com",
+              "status": "active",
+              "machineId": "machine-1",
+              "credentials": {
+                "refreshToken": "refresh-token",
+                "clientId": "client",
+                "clientSecret": "secret",
+                "region": "us-east-1",
+                "apiRegion": "us-west-2"
+              }
+            },
+            {
+              "email": "bad@example.com",
+              "status": "error",
+              "credentials": {
+                "refreshToken": "bad-token"
+              }
+            }
+          ]
+        }
+        "#;
+
+        let items = AdminService::parse_token_json_items_from_str(content).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].refresh_token.as_deref(), Some("refresh-token"));
+        assert_eq!(items[0].client_id.as_deref(), Some("client"));
+        assert_eq!(items[0].client_secret.as_deref(), Some("secret"));
+        assert_eq!(items[0].auth_method.as_deref(), Some("idc"));
+        assert_eq!(items[0].email.as_deref(), Some("kam-user@example.com"));
+        assert_eq!(items[0].region.as_deref(), Some("us-east-1"));
+        assert_eq!(items[0].api_region.as_deref(), Some("us-west-2"));
+        assert_eq!(items[0].machine_id.as_deref(), Some("machine-1"));
+    }
+
+    #[tokio::test]
+    async fn test_import_token_json_from_configured_path_backfills_email() {
+        let refresh_token = "r".repeat(150);
+        let existing = KiroCredentials {
+            refresh_token: Some(refresh_token.clone()),
+            auth_method: Some("idc".to_string()),
+            client_id: Some("client".to_string()),
+            client_secret: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let service = create_test_service_with_credentials(vec![existing]);
+        let token_path = env::temp_dir().join(format!(
+            "kiro-kam-token-json-{}-{}.json",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        let content = serde_json::json!({
+            "version": "1.8.3",
+            "accounts": [{
+                "email": "from-path@example.com",
+                "status": "active",
+                "credentials": {
+                    "refreshToken": refresh_token,
+                    "clientId": "client",
+                    "clientSecret": "secret",
+                    "region": "us-east-1"
+                }
+            }]
+        });
+        fs::write(&token_path, serde_json::to_string(&content).unwrap()).unwrap();
+        service.config.write().kam_token_json_path = Some(token_path.to_string_lossy().to_string());
+
+        let response = service
+            .import_token_json_from_path(super::super::types::ImportTokenJsonFromPathRequest {
+                path: None,
+                dry_run: false,
+                smoke_check: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.summary.added, 0);
+        assert_eq!(response.summary.skipped, 1);
+        assert_eq!(
+            response.items[0].reason.as_deref(),
+            Some("凭据已存在，已更新邮箱")
+        );
+
+        let credentials = service.get_all_credentials();
+        assert_eq!(
+            credentials.credentials[0].email.as_deref(),
+            Some("from-path@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_import_token_json_from_path_requires_path() {
+        let service = create_test_service();
+
+        let err = service
+            .import_token_json_from_path(super::super::types::ImportTokenJsonFromPathRequest {
+                path: None,
+                dry_run: true,
+                smoke_check: false,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("未配置 KAM token JSON 路径"));
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_kam_token_json_path_trimmed() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            region: None,
+            credential_rpm: None,
+            prompt_cache_ttl_seconds: None,
+            prompt_cache_accounting_enabled: None,
+            default_endpoint: None,
+            service_endpoint_family: None,
+            kam_token_json_path: Some(Some("  kam-token.json  ".to_string())),
+            compression: None,
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_ok());
+
+        let config = service.get_global_config();
+        assert_eq!(
+            config.kam_token_json_path.as_deref(),
+            Some("kam-token.json")
+        );
+
+        let persisted = read_persisted_config(&service);
+        assert_eq!(
+            persisted.kam_token_json_path.as_deref(),
+            Some("kam-token.json")
+        );
     }
 
     #[tokio::test]
@@ -1259,6 +1707,7 @@ mod tests {
             prompt_cache_accounting_enabled: None,
             default_endpoint: None,
             service_endpoint_family: Some(crate::model::config::ServiceEndpointFamily::Kiro),
+            kam_token_json_path: None,
             compression: None,
         };
 

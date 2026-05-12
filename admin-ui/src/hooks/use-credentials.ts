@@ -17,12 +17,18 @@ import {
   resetCredentialStats,
   resetAllStats,
   importTokenJson,
+  importTokenJsonFromPath,
   getProxyConfig,
   updateProxyConfig,
   getGlobalConfig,
   updateGlobalConfig,
 } from '@/api/credentials'
-import type { AddCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
+import type {
+  AddCredentialRequest,
+  ImportTokenJsonFromPathRequest,
+  ImportTokenJsonRequest,
+  UpdateGlobalConfigRequest,
+} from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -198,6 +204,18 @@ export function useImportTokenJson() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (req: ImportTokenJsonRequest) => importTokenJson(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+    },
+  })
+}
+
+// 从服务端路径批量导入 token.json
+export function useImportTokenJsonFromPath() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: ImportTokenJsonFromPathRequest) => importTokenJsonFromPath(req),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
       queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
