@@ -474,7 +474,8 @@ pub struct UpdateGlobalConfigRequest {
     pub default_endpoint: Option<String>,
     /// Kiro 服务端点域名族（可选）
     pub service_endpoint_family: Option<ServiceEndpointFamily>,
-    /// Kiro Account Manager 导出的 token JSON 路径（可选；空字符串清空）
+    /// Kiro Account Manager 导出的 token JSON 路径（可选；null 或空字符串清空）
+    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
     pub kam_token_json_path: Option<Option<String>>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
@@ -495,4 +496,26 @@ pub struct UpdateCompressionConfigRequest {
     pub max_history_turns: Option<usize>,
     pub max_history_chars: Option<usize>,
     pub max_request_body_bytes: Option<usize>,
+}
+
+fn deserialize_nullable_string_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateGlobalConfigRequest;
+
+    #[test]
+    fn test_update_global_config_kam_token_json_path_null_means_clear() {
+        let req: UpdateGlobalConfigRequest =
+            serde_json::from_value(serde_json::json!({ "kamTokenJsonPath": null })).unwrap();
+
+        assert_eq!(req.kam_token_json_path, Some(None));
+    }
 }
