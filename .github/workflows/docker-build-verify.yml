@@ -9,16 +9,29 @@ concurrency:
 
 jobs:
   verify_docker_build:
-    name: Verify Docker Build
+    name: Verify Docker Build (${{ matrix.platform }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            tag: linux-amd64
+            cache_scope: docker-linux-amd64
+          - platform: linux/arm64
+            tag: linux-arm64
+            cache_scope: docker-linux-arm64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up QEMU
+        if: matrix.platform != 'linux/amd64'
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -28,8 +41,8 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: false
-          tags: kiro-rs:ci-verify
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: kiro-rs:ci-verify-${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
