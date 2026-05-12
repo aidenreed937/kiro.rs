@@ -211,6 +211,8 @@ pub struct CachedBalanceItem {
     pub usage_percentage: f64,
     /// 订阅类型
     pub subscription_title: Option<String>,
+    /// 下次重置时间（Unix 时间戳）
+    pub next_reset_at: Option<f64>,
     /// 缓存时间（Unix 毫秒时间戳）
     pub cached_at: u64,
     /// 缓存存活时间（秒），缓存过期时间 = cached_at + ttl_secs * 1000

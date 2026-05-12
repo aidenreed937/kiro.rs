@@ -6,7 +6,6 @@ import { storage } from '@/lib/storage'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { CredentialCard } from '@/components/credential-card'
-import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
@@ -26,9 +25,6 @@ interface DashboardProps {
 }
 
 export function Dashboard({ onLogout }: DashboardProps) {
-  const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
-  const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
-  const [forceRefreshBalance, setForceRefreshBalance] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
@@ -141,14 +137,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
     document.documentElement.classList.toggle('dark')
   }
 
-  const handleViewBalance = (id: number, forceRefresh: boolean) => {
-    setSelectedCredentialId(id)
-    setForceRefreshBalance(forceRefresh)
+  const handleViewBalance = async (id: number, forceRefresh: boolean) => {
     if (forceRefresh) {
-      // 清除该凭据的余额缓存，强制重新获取
-      queryClient.invalidateQueries({ queryKey: ['credential-balance', id] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
     }
-    setBalanceDialogOpen(true)
+
+    setLoadingBalanceIds(prev => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+
+    try {
+      const balance = await getCredentialBalance(id)
+      setBalanceMap(prev => {
+        const next = new Map(prev)
+        next.set(id, balance)
+        return next
+      })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+      toast.success(`凭据 #${id} 余额已更新`)
+    } catch (error) {
+      toast.error(`凭据 #${id} 余额查询失败: ${extractErrorMessage(error)}`)
+    } finally {
+      setLoadingBalanceIds(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    }
   }
 
   const handleRefresh = () => {
@@ -783,21 +800,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
           )}
         </div>
       </main>
-
-      {/* 余额对话框 */}
-      <BalanceDialog
-        credentialId={selectedCredentialId}
-        open={balanceDialogOpen}
-        onOpenChange={(open) => {
-          setBalanceDialogOpen(open)
-          if (!open) {
-            setForceRefreshBalance(false)
-            // 关闭弹窗时刷新缓存余额，让卡片显示最新数据
-            queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
-          }
-        }}
-        forceRefresh={forceRefreshBalance}
-      />
 
       {/* 添加凭据对话框 */}
       <AddCredentialDialog

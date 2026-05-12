@@ -147,6 +147,21 @@ function formatQuota(value: number): string {
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 }
 
+function formatResetDate(timestamp?: number | null): string {
+  if (!timestamp) return '未知'
+  const date = new Date(timestamp * 1000)
+  if (Number.isNaN(date.getTime())) return '未知'
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
 function copyToClipboard(value: string, label: string) {
   void navigator.clipboard.writeText(value).then(
     () => toast.success(`${label}已复制`),
@@ -382,6 +397,7 @@ export function CredentialCard({
   const usagePercentage = balance?.usagePercentage ?? cachedBalance?.usagePercentage
   const safeUsagePercentage = Math.min(Math.max(usagePercentage ?? 0, 0), 100)
   const hasUsage = typeof usageLimit === 'number' && usageLimit > 0 && typeof currentUsage === 'number'
+  const nextResetAt = balance?.nextResetAt ?? cachedBalance?.nextResetAt
   const retryAfter = formatRetryAfter(credential.health.retryAfterSecs)
 
   return (
@@ -462,7 +478,7 @@ export function CredentialCard({
             </div>
 
             <div className="grid grid-cols-6 gap-1">
-              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={handleViewBalance} title="查看余额">
+              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={handleViewBalance} title="刷新余额">
                 <Wallet className="h-4 w-4" />
               </Button>
               <Button
@@ -547,6 +563,10 @@ export function CredentialCard({
               <span className="text-muted-foreground">
                 {typeof remaining === 'number' ? `剩余 ${formatQuota(remaining)}` : '点击钱包刷新'}
               </span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>下次重置</span>
+              <span className="font-medium text-foreground">{formatResetDate(nextResetAt)}</span>
             </div>
             {!balance && cachedBalance && cachedBalance.ttlSecs > 0 && (
               <div className="mt-1 text-xs text-muted-foreground">

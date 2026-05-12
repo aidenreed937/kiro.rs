@@ -289,6 +289,7 @@ impl AdminService {
                         usage_limit: cached.data.usage_limit,
                         usage_percentage: cached.data.usage_percentage,
                         subscription_title: cached.data.subscription_title.clone(),
+                        next_reset_at: cached.data.next_reset_at,
                         cached_at: info.cached_at,
                         ttl_secs: info.ttl_secs,
                     }
@@ -299,6 +300,7 @@ impl AdminService {
                         usage_limit: 0.0,
                         usage_percentage: 0.0,
                         subscription_title: None,
+                        next_reset_at: None,
                         cached_at: info.cached_at,
                         ttl_secs: info.ttl_secs,
                     }

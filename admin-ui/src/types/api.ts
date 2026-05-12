@@ -119,6 +119,7 @@ export interface CachedBalanceInfo {
   usageLimit: number
   usagePercentage: number
   subscriptionTitle: string | null
+  nextResetAt: number | null
   cachedAt: number // Unix 毫秒时间戳
   ttlSecs: number
 }
