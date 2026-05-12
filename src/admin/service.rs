@@ -1080,7 +1080,7 @@ impl AdminService {
                     proxy = proxy.with_auth(u.trim(), p.trim());
                 }
                 // 如果未提供新认证信息，保留现有认证
-                if proxy.username.is_none() {
+                if proxy.username.is_none() && !req.clear_proxy_credentials {
                     let config = self.config.read();
                     if let (Some(u), Some(p)) = (&config.proxy_username, &config.proxy_password) {
                         proxy = proxy.with_auth(u, p);

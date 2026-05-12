@@ -246,6 +246,8 @@ pub struct UpdateProxyConfigRequest {
     pub proxy_url: Option<String>,
     pub proxy_username: Option<String>,
     pub proxy_password: Option<String>,
+    #[serde(default)]
+    pub clear_proxy_credentials: bool,
 }
 
 // ============ 通用响应 ============

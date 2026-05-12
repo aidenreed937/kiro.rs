@@ -8,7 +8,9 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { useProxyConfig, useUpdateProxyConfig } from '@/hooks/use-credentials'
+import type { UpdateProxyConfigRequest } from '@/types/api'
 
 interface ProxyConfigDialogProps {
   open: boolean
@@ -22,6 +24,7 @@ export function ProxyConfigDialog({ open, onOpenChange }: ProxyConfigDialogProps
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [clearProxyCredentials, setClearProxyCredentials] = useState(false)
 
   // 当配置加载完成或对话框打开时，同步表单状态
   useEffect(() => {
@@ -29,17 +32,19 @@ export function ProxyConfigDialog({ open, onOpenChange }: ProxyConfigDialogProps
       setProxyUrl(config.proxyUrl || '')
       setProxyUsername('')
       setProxyPassword('')
+      setClearProxyCredentials(false)
     }
   }, [open, config])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
-    const payload: Record<string, string | null> = {
+    const payload: UpdateProxyConfigRequest = {
       proxyUrl: proxyUrl.trim() || null,
     }
-    // 仅当用户填写了认证信息时才发送，留空则保留后端现有认证
-    if (proxyUsername.trim() || proxyPassword.trim()) {
+    if (clearProxyCredentials) {
+      payload.clearProxyCredentials = true
+    } else if (proxyUsername.trim() || proxyPassword.trim()) {
       payload.proxyUsername = proxyUsername.trim() || null
       payload.proxyPassword = proxyPassword.trim() || null
     }
@@ -86,7 +91,7 @@ export function ProxyConfigDialog({ open, onOpenChange }: ProxyConfigDialogProps
                   placeholder="用户名"
                   value={proxyUsername}
                   onChange={(e) => setProxyUsername(e.target.value)}
-                  disabled={isPending}
+                  disabled={isPending || clearProxyCredentials}
                 />
                 <Input
                   id="globalProxyPassword"
@@ -94,13 +99,23 @@ export function ProxyConfigDialog({ open, onOpenChange }: ProxyConfigDialogProps
                   placeholder="密码"
                   value={proxyPassword}
                   onChange={(e) => setProxyPassword(e.target.value)}
-                  disabled={isPending}
+                  disabled={isPending || clearProxyCredentials}
                 />
               </div>
               {config?.hasCredentials && (
-                <p className="text-xs text-muted-foreground">
-                  已配置代理认证。留空保持不变，填写则覆盖
-                </p>
+                <div className="flex items-center justify-between gap-3 rounded-md border p-2">
+                  <p className="text-xs text-muted-foreground">
+                    已配置代理认证。留空保持不变，填写则覆盖
+                  </p>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-xs">清空认证</span>
+                    <Switch
+                      checked={clearProxyCredentials}
+                      onCheckedChange={setClearProxyCredentials}
+                      disabled={isPending}
+                    />
+                  </div>
+                </div>
               )}
             </div>
 

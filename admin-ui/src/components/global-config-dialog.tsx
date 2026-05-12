@@ -15,7 +15,11 @@ import {
   useGlobalConfig,
   useUpdateGlobalConfig,
 } from '@/hooks/use-credentials'
-import type { UpdateGlobalConfigRequest, UpdateCompressionConfigRequest } from '@/types/api'
+import type {
+  UpdateGlobalConfigRequest,
+  UpdateCompressionConfigRequest,
+  UpdateProxyConfigRequest,
+} from '@/types/api'
 
 interface GlobalConfigDialogProps {
   open: boolean
@@ -41,6 +45,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [clearProxyCredentials, setClearProxyCredentials] = useState(false)
 
   // 压缩配置
   const [cEnabled, setCEnabled] = useState(true)
@@ -84,6 +89,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
       setProxyUrl(proxyConfig.proxyUrl || '')
       setProxyUsername('')
       setProxyPassword('')
+      setClearProxyCredentials(false)
     }
   }, [open, globalConfig, proxyConfig])
 
@@ -159,15 +165,18 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
     }
 
     // 代理配置
-    const proxyPayload: Record<string, string | null> = {
+    const proxyPayload: UpdateProxyConfigRequest = {
       proxyUrl: proxyUrl.trim() || null,
     }
-    if (proxyUsername.trim() || proxyPassword.trim()) {
+    if (clearProxyCredentials) {
+      proxyPayload.clearProxyCredentials = true
+    } else if (proxyUsername.trim() || proxyPassword.trim()) {
       proxyPayload.proxyUsername = proxyUsername.trim() || null
       proxyPayload.proxyPassword = proxyPassword.trim() || null
     }
     const hasProxyChanges =
       proxyPayload.proxyUrl !== (proxyConfig?.proxyUrl || null) ||
+      proxyPayload.clearProxyCredentials !== undefined ||
       proxyPayload.proxyUsername !== undefined ||
       proxyPayload.proxyPassword !== undefined
 
@@ -295,10 +304,18 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
               <div className="space-y-1">
                 <label className="text-sm font-medium">代理认证（可选）</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <Input placeholder="用户名" value={proxyUsername} onChange={(e) => setProxyUsername(e.target.value)} disabled={isPending} />
-                  <Input type="password" placeholder="密码" value={proxyPassword} onChange={(e) => setProxyPassword(e.target.value)} disabled={isPending} />
+                  <Input placeholder="用户名" value={proxyUsername} onChange={(e) => setProxyUsername(e.target.value)} disabled={isPending || clearProxyCredentials} />
+                  <Input type="password" placeholder="密码" value={proxyPassword} onChange={(e) => setProxyPassword(e.target.value)} disabled={isPending || clearProxyCredentials} />
                 </div>
-                {proxyConfig?.hasCredentials && <p className="text-xs text-muted-foreground">已配置认证，留空保持不变</p>}
+                {proxyConfig?.hasCredentials && (
+                  <div className="flex items-center justify-between gap-3 rounded-md border p-2">
+                    <p className="text-xs text-muted-foreground">已配置认证，留空保持不变，填写则覆盖</p>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className="text-xs">清空认证</span>
+                      <Switch checked={clearProxyCredentials} onCheckedChange={setClearProxyCredentials} disabled={isPending} />
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

@@ -405,6 +405,7 @@ export interface UpdateProxyConfigRequest {
   proxyUrl?: string | null
   proxyUsername?: string | null
   proxyPassword?: string | null
+  clearProxyCredentials?: boolean
 }
 
 // ============ 全局配置 ============
