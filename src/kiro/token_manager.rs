@@ -1154,6 +1154,10 @@ enum CredentialGate {
     Selectable(CredentialSelectionInfo),
     Disabled,
     Tried,
+    ModelIneligible {
+        id: u64,
+        subscription_title: Option<String>,
+    },
     CoolingDown {
         id: u64,
         reason: CooldownReason,
@@ -1183,6 +1187,31 @@ const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
 /// 继续短睡重试（平滑瞬时抖动）；超过则立即 bail，由上层返回 429 + Retry-After，
 /// 避免 HTTP handler 挂到客户端超时。
 const ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD: StdDuration = StdDuration::from_secs(2);
+
+fn free_subscription_supports_model(model_id: &str) -> bool {
+    matches!(
+        model_id.to_ascii_lowercase().as_str(),
+        "claude-haiku-4.5" | "claude-sonnet-4.5"
+    )
+}
+
+fn is_free_subscription_title(subscription_title: Option<&str>) -> bool {
+    subscription_title
+        .map(|title| title.to_ascii_lowercase().contains("free"))
+        .unwrap_or(false)
+}
+
+fn credential_supports_model(credentials: &KiroCredentials, model_id: Option<&str>) -> bool {
+    let Some(model_id) = model_id else {
+        return true;
+    };
+
+    if !is_free_subscription_title(credentials.subscription_title.as_deref()) {
+        return true;
+    }
+
+    free_subscription_supports_model(model_id)
+}
 
 fn truncate_event_message(message: &str) -> String {
     let trimmed = message.trim();
@@ -1461,6 +1490,14 @@ impl MultiTokenManager {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
     }
 
+    fn available_count_for_model(&self, model_id: Option<&str>) -> usize {
+        self.entries
+            .lock()
+            .iter()
+            .filter(|e| !e.disabled && credential_supports_model(&e.credentials, model_id))
+            .count()
+    }
+
     /// 输出一份"为什么当前没有可用凭据"的诊断信息（用于排障）
     ///
     /// 注意：该方法只在 DEBUG 日志级别开启时执行，避免给正常路径引入额外开销。
@@ -1613,6 +1650,7 @@ impl MultiTokenManager {
         entry: &CredentialEntry,
         tried_ids: &[u64],
         consume_rate_limit: bool,
+        model_id: Option<&str>,
     ) -> CredentialGate {
         if entry.disabled {
             return CredentialGate::Disabled;
@@ -1620,6 +1658,13 @@ impl MultiTokenManager {
 
         if tried_ids.contains(&entry.id) {
             return CredentialGate::Tried;
+        }
+
+        if !credential_supports_model(&entry.credentials, model_id) {
+            return CredentialGate::ModelIneligible {
+                id: entry.id,
+                subscription_title: entry.credentials.subscription_title.clone(),
+            };
         }
 
         if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(entry.id) {
@@ -1651,6 +1696,7 @@ impl MultiTokenManager {
         entries: &[CredentialEntry],
         tried_ids: &mut Vec<u64>,
         consume_rate_limit: bool,
+        model_id: Option<&str>,
         min_wait: &mut Option<std::time::Duration>,
         min_wait_detail: &mut Option<(u64, &'static str, std::time::Duration)>,
         cooling_skipped: &mut usize,
@@ -1658,8 +1704,19 @@ impl MultiTokenManager {
         let mut candidates = Vec::new();
 
         for entry in entries {
-            match self.gate_candidate(entry, tried_ids, consume_rate_limit) {
+            match self.gate_candidate(entry, tried_ids, consume_rate_limit, model_id) {
                 CredentialGate::Selectable(info) => candidates.push(info),
+                CredentialGate::ModelIneligible {
+                    id,
+                    subscription_title,
+                } => {
+                    tracing::trace!(
+                        credential_id = %id,
+                        model_id = ?model_id,
+                        subscription_title = ?subscription_title,
+                        "凭据套餐不支持当前模型，跳过"
+                    );
+                }
                 CredentialGate::CoolingDown {
                     id,
                     reason,
@@ -1707,6 +1764,14 @@ impl MultiTokenManager {
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
     pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
+        self.acquire_context_for_model(None).await
+    }
+
+    /// 获取满足指定模型套餐要求的 API 调用上下文。
+    pub async fn acquire_context_for_model(
+        &self,
+        model_id: Option<&str>,
+    ) -> anyhow::Result<CallContext> {
         // 检查是否需要自动恢复
         self.check_and_recover();
 
@@ -1728,7 +1793,7 @@ impl MultiTokenManager {
             //
             // 这里用 available_count() 判断“可用集合是否已被尝试完”，避免误报
             // "所有凭据均已禁用（x/y）" 这类与事实不符的错误。
-            let enabled_total = self.available_count();
+            let enabled_total = self.available_count_for_model(model_id);
             if enabled_total > 0 && tried_ids.len() >= enabled_total {
                 if let Some(wait) = min_wait {
                     // 仅当本轮所有被跳过的凭据都因冷却/限流时，才以 429 + Retry-After 快速返回；
@@ -1834,6 +1899,7 @@ impl MultiTokenManager {
                     &entries,
                     &mut tried_ids,
                     false,
+                    model_id,
                     &mut min_wait,
                     &mut min_wait_detail,
                     &mut cooling_skipped,
@@ -1859,6 +1925,7 @@ impl MultiTokenManager {
                         &entries,
                         &mut tried_ids,
                         false,
+                        model_id,
                         &mut min_wait,
                         &mut min_wait_detail,
                         &mut cooling_skipped,
@@ -1866,9 +1933,26 @@ impl MultiTokenManager {
                 }
 
                 if candidates.is_empty() {
-                    let available = entries.iter().filter(|e| !e.disabled).count();
+                    let available = entries
+                        .iter()
+                        .filter(|e| {
+                            !e.disabled && credential_supports_model(&e.credentials, model_id)
+                        })
+                        .count();
                     if available == 0 {
-                        anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
+                        if let Some(model_id) = model_id
+                            && !free_subscription_supports_model(model_id)
+                        {
+                            anyhow::bail!(
+                                "没有符合模型 {} 套餐要求的可用凭据（KIRO FREE 仅支持 claude-haiku-4.5 和 claude-sonnet-4.5）",
+                                model_id
+                            );
+                        }
+                        anyhow::bail!(
+                            "所有符合当前模型套餐要求的凭据均已禁用（{}/{}）",
+                            available,
+                            total
+                        );
                     }
                     if min_wait.is_none() {
                         anyhow::bail!(
@@ -1952,14 +2036,25 @@ impl MultiTokenManager {
     ///
     /// 如果用户已绑定凭据且该凭据可用，优先使用绑定的凭据
     /// 否则使用默认的 acquire_context() 逻辑并建立新绑定
+    #[allow(dead_code)]
     pub async fn acquire_context_for_user(
         &self,
         user_id: Option<&str>,
     ) -> anyhow::Result<CallContext> {
+        self.acquire_context_for_user_with_model(user_id, None)
+            .await
+    }
+
+    /// 获取指定用户和模型的 API 调用上下文（带亲和性和套餐过滤）
+    pub async fn acquire_context_for_user_with_model(
+        &self,
+        user_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> anyhow::Result<CallContext> {
         // 无 user_id 时走默认逻辑
         let user_id = match user_id {
             Some(id) if !id.is_empty() => id,
-            _ => return self.acquire_context().await,
+            _ => return self.acquire_context_for_model(model_id).await,
         };
 
         // 默认保持用户绑定（用于连续对话）。当绑定凭据“临时不可用”（速率限制/短冷却）时，
@@ -1971,7 +2066,7 @@ impl MultiTokenManager {
                 let entries = self.entries.lock();
                 entries.iter().find(|e| e.id == bound_id).map(|entry| {
                     (
-                        self.gate_candidate(entry, &[], false),
+                        self.gate_candidate(entry, &[], false, model_id),
                         entry.credentials.clone(),
                     )
                 })
@@ -2038,6 +2133,20 @@ impl MultiTokenManager {
                         "亲和性绑定凭据触发速率限制，本次将分流"
                     );
                 }
+                Some((
+                    CredentialGate::ModelIneligible {
+                        subscription_title, ..
+                    },
+                    _,
+                )) => {
+                    tracing::debug!(
+                        user_id = %mask_user_id(Some(user_id)),
+                        credential_id = %bound_id,
+                        model_id = ?model_id,
+                        subscription_title = ?subscription_title,
+                        "亲和性绑定凭据套餐不支持当前模型，本次将分流"
+                    );
+                }
                 Some((CredentialGate::Disabled | CredentialGate::Tried, _)) => {}
                 None => {
                     tracing::warn!(
@@ -2049,7 +2158,7 @@ impl MultiTokenManager {
             }
         }
 
-        let ctx = self.acquire_context().await?;
+        let ctx = self.acquire_context_for_model(model_id).await?;
         if !keep_affinity_binding {
             self.affinity.set(user_id, ctx.id);
         }
@@ -3710,7 +3819,7 @@ impl MultiTokenManager {
             return false;
         };
         matches!(
-            self.gate_candidate(entry, &[], false),
+            self.gate_candidate(entry, &[], false, None),
             CredentialGate::Selectable(_)
         )
     }
@@ -4258,6 +4367,93 @@ mod tests {
 
         let ctx = manager.acquire_context().await.unwrap();
         assert_eq!(ctx.id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_for_model_filters_free_for_paid_models() {
+        let config = Config::default();
+        let mut free_cred = KiroCredentials {
+            access_token: Some("free-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO FREE".to_string()),
+            ..Default::default()
+        };
+        free_cred.priority = 0;
+        let mut pro_cred = KiroCredentials {
+            access_token: Some("pro-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO PRO".to_string()),
+            ..Default::default()
+        };
+        pro_cred.priority = 0;
+
+        let manager =
+            MultiTokenManager::new(config, vec![free_cred, pro_cred], None, None, false).unwrap();
+
+        let ctx = manager
+            .acquire_context_for_model(Some("claude-opus-4.7"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(ctx.token, "pro-token");
+    }
+
+    #[test]
+    fn test_free_subscription_model_matrix() {
+        let free_cred = KiroCredentials {
+            subscription_title: Some("KIRO FREE".to_string()),
+            ..Default::default()
+        };
+
+        assert!(credential_supports_model(
+            &free_cred,
+            Some("claude-haiku-4.5")
+        ));
+        assert!(credential_supports_model(
+            &free_cred,
+            Some("claude-sonnet-4.5")
+        ));
+        assert!(!credential_supports_model(
+            &free_cred,
+            Some("claude-sonnet-4.6")
+        ));
+        assert!(!credential_supports_model(
+            &free_cred,
+            Some("claude-opus-4.5")
+        ));
+        assert!(!credential_supports_model(
+            &free_cred,
+            Some("claude-opus-4.6")
+        ));
+        assert!(!credential_supports_model(
+            &free_cred,
+            Some("claude-opus-4.7")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_for_model_allows_free_supported_models() {
+        let config = Config::default();
+        let free_cred = KiroCredentials {
+            access_token: Some("free-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO FREE".to_string()),
+            ..Default::default()
+        };
+
+        let manager = MultiTokenManager::new(config, vec![free_cred], None, None, false).unwrap();
+
+        let haiku = manager
+            .acquire_context_for_model(Some("claude-haiku-4.5"))
+            .await
+            .unwrap();
+        assert_eq!(haiku.id, 1);
+
+        let sonnet = manager
+            .acquire_context_for_model(Some("claude-sonnet-4.5"))
+            .await
+            .unwrap();
+        assert_eq!(sonnet.id, 1);
     }
 
     #[tokio::test]

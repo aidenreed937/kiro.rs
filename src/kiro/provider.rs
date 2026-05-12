@@ -350,6 +350,18 @@ impl KiroProvider {
         self.call_api_with_retry(request_body, true, user_id).await
     }
 
+    fn extract_request_model_id(request_body: &str) -> Option<String> {
+        serde_json::from_str::<KiroRequest>(request_body)
+            .ok()
+            .map(|request| {
+                request
+                    .conversation_state
+                    .current_message
+                    .user_input_message
+                    .model_id
+            })
+    }
+
     /// 发送 MCP API 请求
     ///
     /// 用于 WebSearch 等工具调用
@@ -653,10 +665,15 @@ impl KiroProvider {
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
+        let model_id = Self::extract_request_model_id(request_body);
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token），支持用户亲和性
-            let ctx = match self.token_manager.acquire_context_for_user(user_id).await {
+            let ctx = match self
+                .token_manager
+                .acquire_context_for_user_with_model(user_id, model_id.as_deref())
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -1353,6 +1370,16 @@ mod tests {
             value.pointer("/conversationState/currentMessage/userInputMessage/content"),
             Some(&serde_json::Value::String("Reply with OK.".to_string()))
         );
+    }
+
+    #[test]
+    fn test_extract_request_model_id() {
+        let body = KiroProvider::smoke_check_request_body().unwrap();
+        assert_eq!(
+            KiroProvider::extract_request_model_id(&body),
+            Some("claude-sonnet-4.5".to_string())
+        );
+        assert_eq!(KiroProvider::extract_request_model_id("{}"), None);
     }
 
     #[test]
