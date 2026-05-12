@@ -6,6 +6,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 kiro-rs 是一个用 Rust 编写的 Anthropic Codex API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。支持多凭据管理、自动故障转移、流式响应和 Web 管理界面。
 
+## 当前本地维护状态
+
+- 本地 `master` 已整合 `origin/master`、`origin/chore-docker-build-verify-kam-clear` 的 3 个提交，以及 `origin/fix/invalid-model-diagnostics` 的等价修复。
+- 当前本地 `master` 比 `origin/master` 领先 7 个提交，工作区应保持干净；确认无新远程提交后可 `git push origin master`。
+- 最近一次整合验证已通过：`pnpm --dir admin-ui build`、`cargo check`。
+
 **技术栈**: Rust (Axum 0.8 + Tokio) + React 18 + TypeScript + Tailwind CSS
 
 ## 常用命令
@@ -61,8 +67,8 @@ POST /v1/messages (Anthropic 格式)
 
 ## 核心设计模式
 
-1. **Provider Pattern** - `kiro/provider.rs`: 统一的 API 提供者接口，处理请求转发和重试。支持凭据级代理（每个凭据可配独立 HTTP/SOCKS5 代理，缓存对应 HTTP Client 避免重复创建）
-2. **Multi-Token Manager** - `kiro/token_manager.rs`: 多凭据管理，按优先级故障转移，后台异步刷新 Token（支持 Social 和 IdC 两种认证方式）。余额缓存动态 TTL：高频用户 10 分钟、低频用户 30 分钟、低余额用户 24 小时，过期时异步刷新不阻塞请求
+1. **Provider Pattern** - `kiro/provider.rs`: 统一的 API 提供者接口，处理请求转发和重试。支持凭据级代理（每个凭据可配独立 HTTP/SOCKS5 代理，缓存对应 HTTP Client 避免重复创建），并按凭据支持的模型过滤候选凭据，避免模型不匹配账号反复失败
+2. **Multi-Token Manager** - `kiro/token_manager.rs`: 多凭据管理，按优先级故障转移，后台异步刷新 Token（支持 Social 和 IdC 两种认证方式）。余额缓存动态 TTL：高频用户 10 分钟、低频用户 30 分钟、低余额用户 24 小时，过期时异步刷新不阻塞请求；支持凭据健康状态、事件历史、冷却清除、验活恢复、代理凭据清空
 3. **Protocol Converter** - `anthropic/converter.rs`: Anthropic ↔ Kiro 双向协议转换，包括模型映射（sonnet/opus/haiku → Kiro 模型 ID）、JSON Schema 规范化（修复 MCP 工具的 `required: null` / `properties: null`）、工具占位符生成、图片格式转换
 4. **Event Stream Parser** - `kiro/parser/`: AWS Event Stream 二进制协议解析（header + payload + CRC32C 校验）
 5. **Streaming Response** - `anthropic/stream.rs`: 使用 `StreamContext` 实时将 Kiro 事件转换为 Anthropic SSE，最终 usage 采用本地估算口径并透传上游 `meteringEvent` 诊断信息
@@ -88,6 +94,8 @@ AppState {
 - 请求失败时 `report_failure()` 触发故障转移到下一个可用凭据
 - 冷却分类管理：`FailureLimit` / `InsufficientBalance` / `ModelUnavailable` / `QuotaExceeded`
 - `MODEL_TEMPORARILY_UNAVAILABLE` 触发全局熔断，禁用所有凭据
+- `INVALID_MODEL_ID` 会记录到凭据错误摘要，并提示检查账号、订阅、API Region、endpoint family 和代理/地域路由
+- 本地 RPM、429、408/5xx、网络发送失败只冷却当前凭据，调度器优先切换其他可用凭据
 
 ## API 端点
 
@@ -97,7 +105,9 @@ AppState {
 - `POST /v1/messages/count_tokens` - Token 计数
 
 **Admin API** (需配置 `adminApiKey`):
-- 凭据 CRUD、状态监控、余额查询
+- 凭据 CRUD、状态监控、余额查询、KAM token 导入
+- 凭据恢复操作：reset、smoke-check、clear cooldown、recover
+- 凭据配置操作：priority、region/apiRegion、endpoint、禁用/启用、凭据级代理
 
 ## 重要注意事项
 
@@ -113,3 +123,5 @@ AppState {
 10. **图片处理**: GIF 会被抽帧并重编码为 JPEG 静态帧序列（最多 20 帧、最多 5fps），以降低请求体大小并提升内容识别效果。图片缩放规则：长边超过 4000px 或总像素超过 400 万时等比缩放
 11. **输入压缩**: 当请求体接近上游限制（约 5MB）时，自动执行多层压缩（空白压缩 → thinking 截断 → tool_result 截断 → tool_use input 截断 → 历史截断），并自动修复 tool_use/tool_result 配对以避免上游 400 错误
 12. **上游 400 排障**: 若遇到 `Improperly formed request` 错误，参考 `docs/troubleshooting/400-improperly-formed-request.md` 和 `tools/test_400_improperly_formed.py` 进行诊断
+13. **Admin UI 余额**: 凭据卡片会展示缓存余额、使用量、下次重置时间；缓存过期时按需刷新
+14. **远程分支维护**: 只看自己 fork 时优先关注 `origin/*`；`upstream/*` 多为上游同名分支引用，不代表本地必须合入
