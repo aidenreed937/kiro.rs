@@ -50,6 +50,9 @@ const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
 /// 429 冷却最大时长上限（避免异常 Retry-After 把单号挂死太久）
 const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
 
+/// 单凭据模型不兼容短冷却，避免同一账号在一次故障转移中反复被选中。
+const INVALID_MODEL_COOLDOWN_SECS: u64 = 300;
+
 /// Kiro API Provider
 ///
 /// 核心组件，负责与 Kiro API 通信
@@ -683,6 +686,17 @@ impl KiroProvider {
             {
                 Ok(c) => c,
                 Err(e) => {
+                    let message = e.to_string();
+                    if Self::is_model_selection_error(&message) {
+                        return Err(e);
+                    }
+                    if Self::is_all_credentials_cooling_message(&message)
+                        && let Some(prev) = last_error.take()
+                    {
+                        if Self::is_invalid_model_id_error_message(&prev.to_string()) {
+                            return Err(prev);
+                        }
+                    }
                     last_error = Some(e);
                     continue;
                 }
@@ -819,26 +833,32 @@ impl KiroProvider {
             if status.as_u16() == 400 {
                 if Self::is_invalid_model_id(&body) {
                     let summary = Self::summarize_error_body(&body);
-                    self.token_manager.record_credential_error(
-                        ctx.id,
-                        format!(
-                            "{} API 请求失败: {} INVALID_MODEL_ID. Upstream: {}",
-                            api_type, status, summary
-                        ),
+                    let error_summary = format!(
+                        "{} API 请求失败: {} INVALID_MODEL_ID. Upstream: {}",
+                        api_type, status, summary
                     );
+                    self.token_manager
+                        .set_credential_cooldown_with_duration_and_message(
+                            ctx.id,
+                            crate::kiro::cooldown::CooldownReason::ModelUnavailable,
+                            Some(Duration::from_secs(INVALID_MODEL_COOLDOWN_SECS)),
+                            Some(&error_summary),
+                        );
                     tracing::warn!(
                         status = %status,
                         response_summary = %summary,
                         endpoint = %endpoint_name,
                         credential_id = %ctx.id,
-                        "400 Bad Request - INVALID_MODEL_ID，可能为账号/订阅/region/代理侧模型不可用"
+                        cooldown_secs = INVALID_MODEL_COOLDOWN_SECS,
+                        "400 Bad Request - INVALID_MODEL_ID，当前凭据短冷却并尝试其他凭据"
                     );
-                    anyhow::bail!(
+                    last_error = Some(anyhow::anyhow!(
                         "{} API 请求失败: {} INVALID_MODEL_ID. Kiro rejected the selected model for this credential. Check account status, subscription, API region, endpoint family, and proxy/region routing. Upstream: {}",
                         api_type,
                         status,
                         summary
-                    );
+                    ));
+                    continue;
                 }
 
                 let is_too_long = Self::is_input_too_long(&body);
@@ -1096,22 +1116,15 @@ impl KiroProvider {
     }
 
     fn handle_transient_upstream_error(&self, credential_id: u64, summary: &str) -> Duration {
-        let cooldown = self
-            .token_manager
-            .set_credential_cooldown_with_duration_and_message(
-                credential_id,
-                crate::kiro::cooldown::CooldownReason::ServerError,
-                None,
-                Some(summary),
-            );
+        self.token_manager
+            .record_credential_error(credential_id, summary);
 
         tracing::warn!(
             credential_id = %credential_id,
-            cooldown_secs = %cooldown.as_secs(),
-            "凭据触发上游瞬态错误，已设置短冷却"
+            "凭据触发上游瞬态错误，仅记录错误摘要，不设置凭据冷却"
         );
 
-        cooldown
+        Duration::ZERO
     }
 
     fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -1212,6 +1225,18 @@ impl KiroProvider {
             .or_else(|| value.pointer("/error/reason").and_then(|v| v.as_str()))
             .or_else(|| value.pointer("/error/Reason").and_then(|v| v.as_str()))
             .is_some_and(|v| v == "INVALID_MODEL_ID")
+    }
+
+    fn is_invalid_model_id_error_message(message: &str) -> bool {
+        message.contains("INVALID_MODEL_ID")
+    }
+
+    fn is_model_selection_error(message: &str) -> bool {
+        message.contains("没有符合模型") || message.contains("套餐要求")
+    }
+
+    fn is_all_credentials_cooling_message(message: &str) -> bool {
+        message.contains("所有凭据均处于冷却/速率限制")
     }
 
     /// 检测是否为「输入过长」类错误

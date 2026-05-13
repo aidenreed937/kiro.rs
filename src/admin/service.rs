@@ -880,6 +880,8 @@ impl AdminService {
                     .update_email_by_refresh_token_prefix(&refresh_token, email.clone())
                 {
                     Ok(Some((credential_id, true))) => {
+                        self.refresh_imported_credential_account_info(credential_id)
+                            .await;
                         return ImportItemResult {
                             index,
                             fingerprint,
@@ -890,6 +892,8 @@ impl AdminService {
                         };
                     }
                     Ok(Some((credential_id, false))) => {
+                        self.refresh_imported_credential_account_info(credential_id)
+                            .await;
                         return ImportItemResult {
                             index,
                             fingerprint,
@@ -991,6 +995,9 @@ impl AdminService {
                     };
                 }
 
+                self.refresh_imported_credential_account_info(credential_id)
+                    .await;
+
                 ImportItemResult {
                     index,
                     fingerprint,
@@ -1022,6 +1029,16 @@ impl AdminService {
 
     async fn smoke_check_imported_credential(&self, credential_id: u64) -> anyhow::Result<()> {
         self.smoke_check_credential(credential_id).await
+    }
+
+    async fn refresh_imported_credential_account_info(&self, credential_id: u64) {
+        if let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await {
+            tracing::warn!(
+                credential_id,
+                "导入凭据后获取订阅等级失败（不影响凭据导入）: {}",
+                e
+            );
+        }
     }
 
     fn rollback_added_credential(&self, credential_id: u64) {

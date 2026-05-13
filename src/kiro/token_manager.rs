@@ -1153,6 +1153,7 @@ struct CredentialSelectionInfo {
     id: u64,
     priority: u32,
     runtime_only: bool,
+    subscription_rank: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1212,6 +1213,17 @@ fn is_free_subscription_title(subscription_title: Option<&str>) -> bool {
     subscription_title
         .map(|title| title.to_ascii_lowercase().contains("free"))
         .unwrap_or(false)
+}
+
+fn subscription_selection_rank(subscription_title: Option<&str>) -> u8 {
+    match subscription_title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        Some(title) if is_free_subscription_title(Some(title)) => 2,
+        Some(_) => 0,
+        None => 1,
+    }
 }
 
 fn credential_supports_model(credentials: &KiroCredentials, model_id: Option<&str>) -> bool {
@@ -1646,16 +1658,31 @@ impl MultiTokenManager {
         );
     }
 
-    /// 选择最佳凭据（两级排序：使用次数最少 + 余额最多；完全相同则轮询）
+    /// 选择最佳凭据（套餐优先级 + 使用次数最少 + 余额最多；完全相同则轮询）
     fn select_best_candidate_id(&self, candidate_ids: &[u64]) -> Option<u64> {
         if candidate_ids.is_empty() {
             return None;
         }
 
         let rr = self.selection_rr.fetch_add(1, Ordering::Relaxed) as usize;
+        let subscription_ranks: HashMap<u64, u8> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|entry| candidate_ids.contains(&entry.id))
+                .map(|entry| {
+                    (
+                        entry.id,
+                        subscription_selection_rank(
+                            entry.credentials.subscription_title.as_deref(),
+                        ),
+                    )
+                })
+                .collect()
+        };
         let cache = self.balance_cache.lock();
 
-        let mut scored: Vec<(u64, u32, f64)> = Vec::with_capacity(candidate_ids.len());
+        let mut scored: Vec<(u64, u8, u32, f64)> = Vec::with_capacity(candidate_ids.len());
         for &id in candidate_ids {
             let (usage, balance, initialized) = cache
                 .get(&id)
@@ -1665,21 +1692,30 @@ impl MultiTokenManager {
             let effective_usage = if initialized { usage } else { u32::MAX };
             // NaN 余额归一化为 0.0，避免 total_cmp 将 NaN 视为最大值
             let effective_balance = if balance.is_finite() { balance } else { 0.0 };
-            scored.push((id, effective_usage, effective_balance));
+            scored.push((
+                id,
+                subscription_ranks.get(&id).copied().unwrap_or(1),
+                effective_usage,
+                effective_balance,
+            ));
         }
 
-        // 第一优先级：使用次数最少
-        let min_usage = scored.iter().map(|(_, usage, _)| *usage).min()?;
-        scored.retain(|(_, usage, _)| *usage == min_usage);
+        // 第一优先级：已知付费套餐优先，其次未知套餐，最后 FREE
+        let min_subscription_rank = scored.iter().map(|(_, rank, _, _)| *rank).min()?;
+        scored.retain(|(_, rank, _, _)| *rank == min_subscription_rank);
 
-        // 第二优先级：余额最多（使用次数相同）
-        let mut max_balance = scored.first().map(|(_, _, b)| *b).unwrap_or(0.0);
-        for &(_, _, balance) in &scored {
+        // 第二优先级：使用次数最少
+        let min_usage = scored.iter().map(|(_, _, usage, _)| *usage).min()?;
+        scored.retain(|(_, _, usage, _)| *usage == min_usage);
+
+        // 第三优先级：余额最多（使用次数相同）
+        let mut max_balance = scored.first().map(|(_, _, _, b)| *b).unwrap_or(0.0);
+        for &(_, _, _, balance) in &scored {
             if balance > max_balance {
                 max_balance = balance;
             }
         }
-        scored.retain(|(_, _, balance)| *balance == max_balance);
+        scored.retain(|(_, _, _, balance)| *balance == max_balance);
 
         if scored.len() == 1 {
             return Some(scored[0].0);
@@ -1733,7 +1769,62 @@ impl MultiTokenManager {
             id: entry.id,
             priority: entry.credentials.priority,
             runtime_only: entry.credentials.runtime_only,
+            subscription_rank: subscription_selection_rank(
+                entry.credentials.subscription_title.as_deref(),
+            ),
         })
+    }
+
+    fn priority_candidate_ids(candidate_infos: &[CredentialSelectionInfo]) -> Vec<u64> {
+        let min_priority = candidate_infos
+            .iter()
+            .map(|info| info.priority)
+            .min()
+            .unwrap_or(0);
+        let prefer_runtime_only = candidate_infos
+            .iter()
+            .any(|info| info.priority == min_priority && info.runtime_only);
+
+        candidate_infos
+            .iter()
+            .filter(|info| {
+                info.priority == min_priority && (!prefer_runtime_only || info.runtime_only)
+            })
+            .map(|info| info.id)
+            .collect()
+    }
+
+    fn affinity_should_divert_to_better_candidate(
+        &self,
+        bound_id: u64,
+        model_id: Option<&str>,
+    ) -> bool {
+        let mut tried_ids = Vec::new();
+        let mut gate_stats = CandidateGateStats::default();
+        let candidate_infos = {
+            let entries = self.entries.lock();
+            self.gated_candidate_infos(&entries, &mut tried_ids, false, model_id, &mut gate_stats)
+        };
+
+        let candidate_ids = Self::priority_candidate_ids(&candidate_infos);
+        if candidate_ids.is_empty() {
+            return false;
+        }
+
+        let min_subscription_rank = candidate_infos
+            .iter()
+            .filter(|info| candidate_ids.contains(&info.id))
+            .map(|info| info.subscription_rank)
+            .min()
+            .unwrap_or(1);
+
+        candidate_infos
+            .iter()
+            .find(|info| info.id == bound_id)
+            .map(|info| {
+                !candidate_ids.contains(&bound_id) || info.subscription_rank > min_subscription_rank
+            })
+            .unwrap_or(false)
     }
 
     fn gated_candidate_infos(
@@ -2015,21 +2106,7 @@ impl MultiTokenManager {
             }
 
             // 按优先级选出候选集合；同优先级时，优先选择仅运行时的环境变量凭据，再做负载均衡选择
-            let min_priority = candidate_infos
-                .iter()
-                .map(|info| info.priority)
-                .min()
-                .unwrap_or(0);
-            let prefer_runtime_only = candidate_infos
-                .iter()
-                .any(|info| info.priority == min_priority && info.runtime_only);
-            let candidate_ids: Vec<u64> = candidate_infos
-                .iter()
-                .filter(|info| {
-                    info.priority == min_priority && (!prefer_runtime_only || info.runtime_only)
-                })
-                .map(|info| info.id)
-                .collect();
+            let candidate_ids = Self::priority_candidate_ids(&candidate_infos);
             let id = self
                 .select_best_candidate_id(&candidate_ids)
                 .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
@@ -2114,7 +2191,14 @@ impl MultiTokenManager {
 
             match bound_gate_and_credentials {
                 Some((CredentialGate::Selectable(_), creds)) => {
-                    if let Err(wait) = self.rate_limiter.try_acquire(bound_id) {
+                    if self.affinity_should_divert_to_better_candidate(bound_id, model_id) {
+                        tracing::debug!(
+                            user_id = %mask_user_id(Some(user_id)),
+                            credential_id = %bound_id,
+                            model_id = ?model_id,
+                            "亲和性绑定凭据不是当前最佳候选，本次将重新选择"
+                        );
+                    } else if let Err(wait) = self.rate_limiter.try_acquire(bound_id) {
                         // check_rate_limit 通过但 try_acquire 竞争失败（TOCTOU），保留绑定分流
                         keep_affinity_binding = true;
                         tracing::debug!(
@@ -4542,6 +4626,70 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.id, 2);
         assert_eq!(ctx.token, "pro-token");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_for_model_prefers_pro_for_free_supported_models() {
+        let config = Config::default();
+        let mut free_cred = KiroCredentials {
+            access_token: Some("free-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO FREE".to_string()),
+            ..Default::default()
+        };
+        free_cred.priority = 0;
+        let mut pro_cred = KiroCredentials {
+            access_token: Some("pro-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO PRO".to_string()),
+            ..Default::default()
+        };
+        pro_cred.priority = 0;
+
+        let manager =
+            MultiTokenManager::new(config, vec![free_cred, pro_cred], None, None, false).unwrap();
+        manager.update_balance_cache(1, 999.0);
+        manager.update_balance_cache(2, 1.0);
+
+        let ctx = manager
+            .acquire_context_for_model(Some("claude-haiku-4.5"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(ctx.token, "pro-token");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_for_user_rebinds_free_affinity_to_pro() {
+        let config = Config::default();
+        let mut free_cred = KiroCredentials {
+            access_token: Some("free-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO FREE".to_string()),
+            ..Default::default()
+        };
+        free_cred.priority = 0;
+        let mut pro_cred = KiroCredentials {
+            access_token: Some("pro-token".to_string()),
+            expires_at: Some((Utc::now() + Duration::hours(1)).to_rfc3339()),
+            subscription_title: Some("KIRO PRO".to_string()),
+            ..Default::default()
+        };
+        pro_cred.priority = 0;
+
+        let manager =
+            MultiTokenManager::new(config, vec![free_cred, pro_cred], None, None, false).unwrap();
+        manager.affinity.set("user-a", 1);
+        manager.update_balance_cache(1, 999.0);
+        manager.update_balance_cache(2, 1.0);
+
+        let ctx = manager
+            .acquire_context_for_user_with_model(Some("user-a"), Some("claude-haiku-4.5"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 2);
+        assert_eq!(ctx.token, "pro-token");
+        assert_eq!(manager.affinity.get("user-a"), Some(2));
     }
 
     #[test]

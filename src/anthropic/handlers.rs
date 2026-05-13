@@ -158,6 +158,11 @@ fn is_no_credentials_error(err: &Error) -> bool {
     s.contains("没有可用的凭据")
 }
 
+fn is_model_selection_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("没有符合模型") || s.contains("套餐要求")
+}
+
 /// 检查是否为"所有凭据均处于冷却/速率限制"错误，并提取建议的 retry_after 秒数。
 fn is_all_credentials_cooling_down_error(err: &Error) -> (bool, Option<u64>) {
     let s = err.to_string();
@@ -506,6 +511,15 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
                 "service_unavailable",
                 "No credentials available. Please add or enable credentials via Admin API or credentials.json.",
             )),
+        )
+            .into_response();
+    }
+
+    if is_model_selection_error(&err) {
+        tracing::warn!(error = %err, "没有符合当前模型套餐要求的凭据");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("invalid_request_error", err.to_string())),
         )
             .into_response();
     }
@@ -1047,7 +1061,7 @@ pub async fn post_messages(
     let tool_name_map = conversion_result.tool_name_map;
     let mut kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
-        profile_arn: state.profile_arn.clone(),
+        profile_arn: None,
     };
 
     let mut request_body = match serde_json::to_string(&kiro_request) {
