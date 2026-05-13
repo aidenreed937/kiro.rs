@@ -246,7 +246,8 @@ export function CredentialCard({
   const forceRefreshToken = useForceRefreshToken()
   const deleteCredential = useDeleteCredential()
 
-  const recoverableWithoutSmoke = [
+  const isLocalRpmLimited = credential.health.reason === 'local_rpm_limited'
+  const recoverableWithoutSmoke = !isLocalRpmLimited && [
     'cooling_down',
     'rate_limited',
     'token_refresh_failed',
@@ -261,7 +262,10 @@ export function CredentialCard({
     'model_unavailable',
     'insufficient_balance',
   ].includes(credential.health.status)
-  const hasCooldown = credential.health.retryAfterSecs !== undefined && credential.health.retryAfterSecs !== null
+  const hasCooldown =
+    !isLocalRpmLimited &&
+    credential.health.retryAfterSecs !== undefined &&
+    credential.health.retryAfterSecs !== null
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(

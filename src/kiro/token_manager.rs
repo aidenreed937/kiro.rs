@@ -3488,6 +3488,7 @@ impl MultiTokenManager {
         }
 
         self.persist_credentials()?;
+        self.save_stats_debounced();
         Ok(())
     }
 
@@ -4794,9 +4795,11 @@ mod tests {
             CooldownReason::RateLimitExceeded,
             Some(std::time::Duration::from_secs(120)),
         );
+        manager.stats_dirty.store(false, Ordering::Relaxed);
 
         manager.recover_for_admin(1, false).unwrap();
         assert!(manager.cooldown_manager().check_cooldown(1).is_none());
+        assert!(manager.stats_dirty.load(Ordering::Relaxed));
         let snapshot = manager.snapshot();
         assert!(
             snapshot.entries[0]
