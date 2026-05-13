@@ -1,19 +1,66 @@
 //! Admin API HTTP 处理器
 
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
     response::IntoResponse,
 };
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, ImportTokenJsonFromPathRequest, ImportTokenJsonRequest,
-        RecoverCredentialRequest, SetDisabledRequest, SetEndpointRequest, SetPriorityRequest,
-        SetRegionRequest, SuccessResponse, UpdateProxyConfigRequest,
+        AddCredentialRequest, BatchBalanceResponse, BatchBalanceResult,
+        BatchCredentialActionResponse, BatchCredentialActionResult, BatchCredentialIdsRequest,
+        ImportTokenJsonFromPathRequest, ImportTokenJsonRequest, RecoverCredentialRequest,
+        SetDisabledRequest, SetEndpointRequest, SetPriorityRequest, SetRegionRequest,
+        SuccessResponse, UpdateProxyConfigRequest,
     },
 };
+
+const MAX_BATCH_CREDENTIALS: usize = 50;
+
+fn normalize_batch_ids(ids: Vec<u64>) -> Result<Vec<u64>, String> {
+    let mut seen = HashSet::new();
+    let normalized: Vec<u64> = ids
+        .into_iter()
+        .filter(|id| *id > 0 && seen.insert(*id))
+        .collect();
+
+    if normalized.is_empty() {
+        return Err("ids 不能为空".to_string());
+    }
+
+    if normalized.len() > MAX_BATCH_CREDENTIALS {
+        return Err(format!("单次最多支持 {} 个凭据", MAX_BATCH_CREDENTIALS));
+    }
+
+    Ok(normalized)
+}
+
+fn invalid_batch_request(message: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(super::types::AdminErrorResponse::invalid_request(message)),
+    )
+        .into_response()
+}
+
+fn build_batch_action_response(
+    results: Vec<BatchCredentialActionResult>,
+) -> BatchCredentialActionResponse {
+    let total = results.len();
+    let success_count = results.iter().filter(|r| r.success).count();
+    BatchCredentialActionResponse {
+        success: success_count == total,
+        total,
+        success_count,
+        failure_count: total.saturating_sub(success_count),
+        results,
+    }
+}
 
 /// GET /api/admin/credentials
 /// 获取所有凭据状态
@@ -104,6 +151,36 @@ pub async fn reset_failure_count(
     }
 }
 
+/// POST /api/admin/credentials/reset
+/// 批量重置失败计数并重新启用
+pub async fn batch_reset_failure_count(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchCredentialIdsRequest>,
+) -> impl IntoResponse {
+    let ids = match normalize_batch_ids(payload.ids) {
+        Ok(ids) => ids,
+        Err(message) => return invalid_batch_request(message),
+    };
+
+    let results = ids
+        .into_iter()
+        .map(|id| match state.service.reset_and_enable(id) {
+            Ok(_) => BatchCredentialActionResult {
+                id,
+                success: true,
+                message: format!("凭据 #{} 失败计数已重置并重新启用", id),
+            },
+            Err(e) => BatchCredentialActionResult {
+                id,
+                success: false,
+                message: e.to_string(),
+            },
+        })
+        .collect();
+
+    Json(build_batch_action_response(results)).into_response()
+}
+
 /// POST /api/admin/credentials/:id/refresh
 /// 强制刷新指定凭据 Token
 pub async fn force_refresh_token(
@@ -120,6 +197,36 @@ pub async fn force_refresh_token(
     }
 }
 
+/// POST /api/admin/credentials/refresh
+/// 批量强制刷新凭据 Token。服务端顺序执行，避免并发冲击上游账号。
+pub async fn batch_force_refresh_token(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchCredentialIdsRequest>,
+) -> impl IntoResponse {
+    let ids = match normalize_batch_ids(payload.ids) {
+        Ok(ids) => ids,
+        Err(message) => return invalid_batch_request(message),
+    };
+
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        match state.service.force_refresh_token(id).await {
+            Ok(_) => results.push(BatchCredentialActionResult {
+                id,
+                success: true,
+                message: format!("凭据 #{} Token 已强制刷新", id),
+            }),
+            Err(e) => results.push(BatchCredentialActionResult {
+                id,
+                success: false,
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    Json(build_batch_action_response(results)).into_response()
+}
+
 /// POST /api/admin/credentials/:id/smoke-check
 /// 使用指定凭据发送最小消息验活
 pub async fn smoke_check_credential(
@@ -130,6 +237,36 @@ pub async fn smoke_check_credential(
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 发消息验活通过", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// POST /api/admin/credentials/smoke-check
+/// 批量发送最小消息验活。服务端顺序执行，避免并发冲击上游账号。
+pub async fn batch_smoke_check_credential(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchCredentialIdsRequest>,
+) -> impl IntoResponse {
+    let ids = match normalize_batch_ids(payload.ids) {
+        Ok(ids) => ids,
+        Err(message) => return invalid_batch_request(message),
+    };
+
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        match state.service.smoke_check_existing_credential(id).await {
+            Ok(_) => results.push(BatchCredentialActionResult {
+                id,
+                success: true,
+                message: format!("凭据 #{} 发消息验活通过", id),
+            }),
+            Err(e) => results.push(BatchCredentialActionResult {
+                id,
+                success: false,
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    Json(build_batch_action_response(results)).into_response()
 }
 
 /// POST /api/admin/credentials/:id/cooldown/clear
@@ -174,6 +311,47 @@ pub async fn get_credential_balance(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// POST /api/admin/credentials/balances/refresh
+/// 批量刷新凭据余额。服务端顺序执行，避免并发冲击上游账号。
+pub async fn batch_refresh_balances(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchCredentialIdsRequest>,
+) -> impl IntoResponse {
+    let ids = match normalize_batch_ids(payload.ids) {
+        Ok(ids) => ids,
+        Err(message) => return invalid_batch_request(message),
+    };
+
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        match state.service.get_balance(id).await {
+            Ok(balance) => results.push(BatchBalanceResult {
+                id,
+                success: true,
+                balance: Some(balance),
+                error: None,
+            }),
+            Err(e) => results.push(BatchBalanceResult {
+                id,
+                success: false,
+                balance: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    let total = results.len();
+    let success_count = results.iter().filter(|r| r.success).count();
+    Json(BatchBalanceResponse {
+        success: success_count == total,
+        total,
+        success_count,
+        failure_count: total.saturating_sub(success_count),
+        results,
+    })
+    .into_response()
 }
 
 /// GET /api/admin/credentials/balances/cached

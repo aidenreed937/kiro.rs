@@ -182,6 +182,36 @@ pub struct RecoverCredentialRequest {
     pub smoke_check: bool,
 }
 
+// ============ 批量操作 ============
+
+/// 批量凭据操作请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCredentialIdsRequest {
+    /// 凭据 ID 列表。服务端会按传入顺序顺序执行，并跳过重复 ID。
+    pub ids: Vec<u64>,
+}
+
+/// 批量凭据操作单项结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCredentialActionResult {
+    pub id: u64,
+    pub success: bool,
+    pub message: String,
+}
+
+/// 批量凭据操作响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchCredentialActionResponse {
+    pub success: bool,
+    pub total: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub results: Vec<BatchCredentialActionResult>,
+}
+
 // ============ 余额查询 ============
 
 /// 余额查询响应
@@ -232,6 +262,29 @@ pub struct CachedBalanceItem {
 pub struct CachedBalancesResponse {
     /// 各凭据的缓存余额列表
     pub balances: Vec<CachedBalanceItem>,
+}
+
+/// 批量余额刷新单项结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchBalanceResult {
+    pub id: u64,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<BalanceResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 批量余额刷新响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchBalanceResponse {
+    pub success: bool,
+    pub total: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub results: Vec<BatchBalanceResult>,
 }
 
 // ============ 负载均衡配置 ============

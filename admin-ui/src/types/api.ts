@@ -132,6 +132,21 @@ export interface CachedBalancesResponse {
   balances: CachedBalanceInfo[]
 }
 
+export interface BatchBalanceResult {
+  id: number
+  success: boolean
+  balance?: BalanceResponse
+  error?: string
+}
+
+export interface BatchBalanceResponse {
+  success: boolean
+  total: number
+  successCount: number
+  failureCount: number
+  results: BatchBalanceResult[]
+}
+
 // 成功响应
 export interface SuccessResponse {
   success: boolean
@@ -213,6 +228,24 @@ export interface AddCredentialRequest {
 
 export interface RecoverCredentialRequest {
   smokeCheck?: boolean
+}
+
+export interface BatchCredentialIdsRequest {
+  ids: number[]
+}
+
+export interface BatchCredentialActionResult {
+  id: number
+  success: boolean
+  message: string
+}
+
+export interface BatchCredentialActionResponse {
+  success: boolean
+  total: number
+  successCount: number
+  failureCount: number
+  results: BatchCredentialActionResult[]
 }
 
 // 添加凭据响应

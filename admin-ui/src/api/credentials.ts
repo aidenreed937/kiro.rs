@@ -20,6 +20,9 @@ import type {
   UpdateProxyConfigRequest,
   GlobalConfigResponse,
   UpdateGlobalConfigRequest,
+  BatchBalanceResponse,
+  BatchCredentialActionResponse,
+  BatchCredentialIdsRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -77,8 +80,28 @@ export async function resetCredentialFailure(
   return data
 }
 
+export async function batchResetCredentialFailure(
+  ids: number[]
+): Promise<BatchCredentialActionResponse> {
+  const { data } = await api.post<BatchCredentialActionResponse>(
+    '/credentials/reset',
+    { ids } as BatchCredentialIdsRequest
+  )
+  return data
+}
+
 export async function smokeCheckCredential(id: number): Promise<SuccessResponse> {
   const { data } = await api.post<SuccessResponse>(`/credentials/${id}/smoke-check`)
+  return data
+}
+
+export async function batchSmokeCheckCredentials(
+  ids: number[]
+): Promise<BatchCredentialActionResponse> {
+  const { data } = await api.post<BatchCredentialActionResponse>(
+    '/credentials/smoke-check',
+    { ids } as BatchCredentialIdsRequest
+  )
   return data
 }
 
@@ -126,9 +149,27 @@ export async function forceRefreshToken(id: number): Promise<SuccessResponse> {
   return data
 }
 
+export async function batchForceRefreshTokens(
+  ids: number[]
+): Promise<BatchCredentialActionResponse> {
+  const { data } = await api.post<BatchCredentialActionResponse>(
+    '/credentials/refresh',
+    { ids } as BatchCredentialIdsRequest
+  )
+  return data
+}
+
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
+  return data
+}
+
+export async function batchRefreshBalances(ids: number[]): Promise<BatchBalanceResponse> {
+  const { data } = await api.post<BatchBalanceResponse>(
+    '/credentials/balances/refresh',
+    { ids } as BatchCredentialIdsRequest
+  )
   return data
 }
 

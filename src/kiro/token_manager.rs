@@ -1095,6 +1095,8 @@ pub struct MultiTokenManager {
     entries: Mutex<Vec<CredentialEntry>>,
     /// Token 刷新锁，确保同一时间只有一个刷新操作
     refresh_lock: TokioMutex<()>,
+    /// 凭据文件持久化锁，避免多个 Admin 操作同时写同一个临时文件
+    persist_lock: Mutex<()>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
     /// 是否为多凭据格式（数组格式才回写）
@@ -1464,6 +1466,7 @@ impl MultiTokenManager {
             proxy: RwLock::new(proxy),
             entries: Mutex::new(entries),
             refresh_lock: TokioMutex::new(()),
+            persist_lock: Mutex::new(()),
             credentials_path,
             is_multiple_format,
             model_unavailable_count: AtomicU32::new(0),
@@ -2683,6 +2686,8 @@ impl MultiTokenManager {
     /// - `Err(_)` - 写入失败
     fn persist_credentials(&self) -> anyhow::Result<bool> {
         use anyhow::Context;
+
+        let _persist_guard = self.persist_lock.lock();
 
         // 仅多凭据格式才回写
         if !self.is_multiple_format {

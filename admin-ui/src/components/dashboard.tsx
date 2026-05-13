@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, Globe, ArrowUp, ArrowDown } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, Globe, ArrowUp, ArrowDown, LayoutGrid, List } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -11,14 +11,25 @@ import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { ProxyConfigDialog } from '@/components/proxy-config-dialog'
 import { GlobalConfigDialog } from '@/components/global-config-dialog'
-import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useForceRefreshToken, useProxyConfig, useGlobalConfig } from '@/hooks/use-credentials'
-import { getCredentialBalance } from '@/api/credentials'
+import {
+  useCredentials,
+  useCachedBalances,
+  useDeleteCredential,
+  useBatchResetFailure,
+  useBatchForceRefreshTokens,
+  useBatchRefreshBalances,
+  useBatchSmokeCheckCredentials,
+  useProxyConfig,
+  useGlobalConfig,
+} from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import type { BalanceResponse } from '@/types/api'
 
 type SortField = 'default' | 'id' | 'balance'
 type SortOrder = 'asc' | 'desc'
+type FilterField = 'all' | 'available' | 'disabled' | 'unhealthy' | 'pro' | 'free'
+type ViewMode = 'expanded' | 'compact'
 
 interface DashboardProps {
   onLogout: () => void
@@ -38,11 +49,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
   const [queryingInfo, setQueryingInfo] = useState(false)
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
-  const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [sortField, setSortField] = useState<SortField>('default')
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
-  const itemsPerPage = 12
+  const [filterField, setFilterField] = useState<FilterField>('all')
+  const [viewMode, setViewMode] = useState<ViewMode>('expanded')
+  const itemsPerPage = viewMode === 'compact' ? 24 : 12
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark')
@@ -54,19 +66,63 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data, isLoading, error, refetch } = useCredentials()
   const { data: cachedBalancesData } = useCachedBalances()
   const { mutate: deleteCredential } = useDeleteCredential()
-  const { mutate: resetFailure } = useResetFailure()
-  const { mutate: forceRefreshToken } = useForceRefreshToken()
+  const { mutateAsync: batchResetFailure } = useBatchResetFailure()
+  const { mutateAsync: batchForceRefreshTokens } = useBatchForceRefreshTokens()
+  const { mutateAsync: batchRefreshBalances } = useBatchRefreshBalances()
+  const { mutateAsync: batchSmokeCheckCredentials } = useBatchSmokeCheckCredentials()
   const { data: proxyConfig } = useProxyConfig()
   const { data: globalConfig } = useGlobalConfig()
 
   // 构建 id -> cachedBalance 的映射
-  const cachedBalanceMap = new Map(
-    cachedBalancesData?.balances.map((b) => [b.id, b]) ?? []
+  const cachedBalanceMap = useMemo(
+    () => new Map(cachedBalancesData?.balances.map((b) => [b.id, b]) ?? []),
+    [cachedBalancesData?.balances]
   )
+
+  const credentialSubscriptionTitle = (credential: NonNullable<typeof data>['credentials'][number]) =>
+    balanceMap.get(credential.id)?.subscriptionTitle ??
+    cachedBalanceMap.get(credential.id)?.subscriptionTitle ??
+    credential.subscriptionTitle ??
+    ''
+
+  const matchesFilter = (credential: NonNullable<typeof data>['credentials'][number], filter: FilterField) => {
+    const subscription = credentialSubscriptionTitle(credential).toLowerCase()
+    switch (filter) {
+      case 'available':
+        return !credential.disabled
+      case 'disabled':
+        return credential.disabled
+      case 'unhealthy':
+        return credential.health.status !== 'healthy'
+      case 'pro':
+        return subscription.includes('pro')
+      case 'free':
+        return subscription.includes('free')
+      default:
+        return true
+    }
+  }
+
+  const filterCounts = useMemo(() => {
+    const credentials = data?.credentials || []
+    return {
+      all: credentials.length,
+      available: credentials.filter((credential) => matchesFilter(credential, 'available')).length,
+      disabled: credentials.filter((credential) => matchesFilter(credential, 'disabled')).length,
+      unhealthy: credentials.filter((credential) => matchesFilter(credential, 'unhealthy')).length,
+      pro: credentials.filter((credential) => matchesFilter(credential, 'pro')).length,
+      free: credentials.filter((credential) => matchesFilter(credential, 'free')).length,
+    }
+  }, [data?.credentials, balanceMap, cachedBalanceMap])
+
+  const filteredCredentials = useMemo(() => {
+    const credentials = data?.credentials || []
+    return credentials.filter((credential) => matchesFilter(credential, filterField))
+  }, [data?.credentials, filterField, balanceMap, cachedBalanceMap])
 
   // 排序后的凭据列表
   const sortedCredentials = useMemo(() => {
-    const credentials = data?.credentials || []
+    const credentials = filteredCredentials
     if (sortField === 'default') return credentials
 
     return [...credentials].sort((a, b) => {
@@ -80,7 +136,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       }
       return sortOrder === 'asc' ? cmp : -cmp
     })
-  }, [data?.credentials, sortField, sortOrder, cachedBalanceMap])
+  }, [filteredCredentials, sortField, sortOrder, cachedBalanceMap])
 
   // 计算分页
   const totalPages = Math.ceil(sortedCredentials.length / itemsPerPage)
@@ -96,7 +152,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // 当凭据列表变化时重置到第一页
   useEffect(() => {
     setCurrentPage(1)
-  }, [data?.credentials.length])
+  }, [data?.credentials.length, filterField, viewMode])
 
   // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
   useEffect(() => {
@@ -149,7 +205,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
 
     try {
-      const balance = await getCredentialBalance(id)
+      const response = await batchRefreshBalances([id])
+      const result = response.results[0]
+      if (!result?.success || !result.balance) {
+        throw new Error(result?.error || '余额查询失败')
+      }
+      const balance = result.balance
       setBalanceMap(prev => {
         const next = new Map(prev)
         next.set(id, balance)
@@ -280,32 +341,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
       return
     }
 
-    let successCount = 0
-    let failCount = 0
+    try {
+      const response = await batchResetFailure(failedIds)
 
-    for (const id of failedIds) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          resetFailure(id, {
-            onSuccess: () => {
-              successCount++
-              resolve()
-            },
-            onError: (err) => {
-              failCount++
-              reject(err)
-            }
-          })
-        })
-      } catch (error) {
-        // 错误已在 onError 中处理
+      if (response.failureCount === 0) {
+        toast.success(`成功恢复 ${response.successCount} 个凭据`)
+      } else {
+        toast.warning(`成功 ${response.successCount} 个，失败 ${response.failureCount} 个`)
       }
-    }
-
-    if (failCount === 0) {
-      toast.success(`成功恢复 ${successCount} 个凭据`)
-    } else {
-      toast.warning(`成功 ${successCount} 个，失败 ${failCount} 个`)
+    } catch (error) {
+      toast.error(`批量恢复失败: ${extractErrorMessage(error)}`)
     }
 
     deselectAll()
@@ -318,32 +363,16 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     const ids = Array.from(selectedIds)
-    let successCount = 0
-    let failCount = 0
+    try {
+      const response = await batchForceRefreshTokens(ids)
 
-    for (const id of ids) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          forceRefreshToken(id, {
-            onSuccess: () => {
-              successCount++
-              resolve()
-            },
-            onError: () => {
-              failCount++
-              reject(new Error('refresh failed'))
-            }
-          })
-        })
-      } catch {
-        // noop
+      if (response.failureCount === 0) {
+        toast.success(`成功刷新 ${response.successCount} 个凭据`)
+      } else {
+        toast.warning(`刷新完成：成功 ${response.successCount} 个，失败 ${response.failureCount} 个`)
       }
-    }
-
-    if (failCount === 0) {
-      toast.success(`成功刷新 ${successCount} 个凭据`)
-    } else {
-      toast.warning(`刷新完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+    } catch (error) {
+      toast.error(`批量刷新失败: ${extractErrorMessage(error)}`)
     }
   }
 
@@ -396,7 +425,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     deselectAll()
   }
 
-  // 查询当前页凭据信息（逐个查询，避免瞬时并发）
+  // 查询当前页凭据信息（服务端顺序批量刷新，避免前端请求风暴）
   const handleQueryCurrentPageInfo = async () => {
     if (currentCredentials.length === 0) {
       toast.error('当前页没有可查询的凭据')
@@ -415,46 +444,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setQueryingInfo(true)
     setQueryInfoProgress({ current: 0, total: ids.length })
 
-    let successCount = 0
-    let failCount = 0
+    setLoadingBalanceIds(prev => new Set([...prev, ...ids]))
 
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i]
-
-      setLoadingBalanceIds(prev => {
-        const next = new Set(prev)
-        next.add(id)
+    try {
+      const response = await batchRefreshBalances(ids)
+      setBalanceMap(prev => {
+        const next = new Map(prev)
+        response.results.forEach(result => {
+          if (result.success && result.balance) {
+            next.set(result.id, result.balance)
+          }
+        })
         return next
       })
+      setQueryInfoProgress({ current: response.total, total: response.total })
 
-      try {
-        const balance = await getCredentialBalance(id)
-        successCount++
-
-        setBalanceMap(prev => {
-          const next = new Map(prev)
-          next.set(id, balance)
-          return next
-        })
-      } catch (error) {
-        failCount++
-      } finally {
-        setLoadingBalanceIds(prev => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
+      if (response.failureCount === 0) {
+        toast.success(`查询完成：成功 ${response.successCount}/${response.total}`)
+      } else {
+        toast.warning(`查询完成：成功 ${response.successCount} 个，失败 ${response.failureCount} 个`)
       }
-
-      setQueryInfoProgress({ current: i + 1, total: ids.length })
-    }
-
-    setQueryingInfo(false)
-
-    if (failCount === 0) {
-      toast.success(`查询完成：成功 ${successCount}/${ids.length}`)
-    } else {
-      toast.warning(`查询完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+    } catch (error) {
+      toast.error(`批量查询失败: ${extractErrorMessage(error)}`)
+    } finally {
+      setQueryingInfo(false)
+      setLoadingBalanceIds(prev => {
+        const next = new Set(prev)
+        ids.forEach(id => next.delete(id))
+        return next
+      })
     }
   }
 
@@ -467,11 +485,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     // 初始化状态
     setVerifying(true)
-    cancelVerifyRef.current = false
     const ids = Array.from(selectedIds)
     setVerifyProgress({ current: 0, total: ids.length })
-
-    let successCount = 0
 
     // 初始化结果，所有凭据状态为 pending
     const initialResults = new Map<number, VerifyResult>()
@@ -481,70 +496,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setVerifyResults(initialResults)
     setVerifyDialogOpen(true)
 
-    // 开始验活
-    for (let i = 0; i < ids.length; i++) {
-      // 检查是否取消
-      if (cancelVerifyRef.current) {
-        toast.info('已取消验活')
-        break
-      }
+    setVerifyResults(prev => {
+      const newResults = new Map(prev)
+      ids.forEach(id => newResults.set(id, { id, status: 'verifying' }))
+      return newResults
+    })
 
-      const id = ids[i]
-
-      // 更新当前凭据状态为 verifying
+    try {
+      const response = await batchSmokeCheckCredentials(ids)
       setVerifyResults(prev => {
         const newResults = new Map(prev)
-        newResults.set(id, { id, status: 'verifying' })
+        response.results.forEach(result => {
+          newResults.set(result.id, result.success
+            ? { id: result.id, status: 'success' }
+            : { id: result.id, status: 'failed', error: result.message })
+        })
         return newResults
       })
+      setVerifyProgress({ current: response.total, total: response.total })
 
-      try {
-        const balance = await getCredentialBalance(id)
-        successCount++
-
-        // 更新为成功状态
-        setVerifyResults(prev => {
-          const newResults = new Map(prev)
-          newResults.set(id, {
-            id,
-            status: 'success',
-            usage: `${balance.currentUsage}/${balance.usageLimit}`
-          })
-          return newResults
-        })
-      } catch (error) {
-        // 更新为失败状态
-        setVerifyResults(prev => {
-          const newResults = new Map(prev)
-          newResults.set(id, {
-            id,
-            status: 'failed',
-            error: extractErrorMessage(error)
-          })
-          return newResults
-        })
+      if (response.failureCount === 0) {
+        toast.success(`验活完成：成功 ${response.successCount}/${response.total}`)
+      } else {
+        toast.warning(`验活完成：成功 ${response.successCount} 个，失败 ${response.failureCount} 个`)
       }
-
-      // 更新进度
-      setVerifyProgress({ current: i + 1, total: ids.length })
-
-      // 添加延迟防止封号（最后一个不需要延迟）
-      if (i < ids.length - 1 && !cancelVerifyRef.current) {
-        await new Promise(resolve => setTimeout(resolve, 2000))
-      }
+    } catch (error) {
+      toast.error(`批量验活失败: ${extractErrorMessage(error)}`)
+    } finally {
+      setVerifying(false)
     }
-
-    setVerifying(false)
-
-    if (!cancelVerifyRef.current) {
-      toast.success(`验活完成：成功 ${successCount}/${ids.length}`)
-    }
-  }
-
-  // 取消验活
-  const handleCancelVerify = () => {
-    cancelVerifyRef.current = true
-    setVerifying(false)
   }
 
   if (isLoading) {
@@ -647,6 +627,32 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap items-center gap-3">
               <h2 className="text-xl font-semibold">凭据管理</h2>
+              <div className="flex flex-wrap items-center gap-1">
+                {([
+                  ['all', '全部', filterCounts.all],
+                  ['available', '可用', filterCounts.available],
+                  ['disabled', '禁用', filterCounts.disabled],
+                  ['unhealthy', '异常', filterCounts.unhealthy],
+                  ['pro', 'PRO', filterCounts.pro],
+                  ['free', 'FREE', filterCounts.free],
+                ] as const).map(([field, label, count]) => {
+                  const active = filterField === field
+                  return (
+                    <Button
+                      key={field}
+                      size="sm"
+                      variant={active ? 'secondary' : 'outline'}
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setFilterField(field)}
+                    >
+                      {label}
+                      <Badge variant={active ? 'default' : 'secondary'} className="ml-1 px-1.5 py-0 text-[10px]">
+                        {count}
+                      </Badge>
+                    </Button>
+                  )
+                })}
+              </div>
               {/* 排序控件 */}
               <div className="flex items-center gap-1">
                 {([
@@ -672,6 +678,28 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     </Button>
                   )
                 })}
+              </div>
+              <div className="flex items-center gap-1 rounded-md border p-0.5">
+                <Button
+                  size="sm"
+                  variant={viewMode === 'expanded' ? 'secondary' : 'ghost'}
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setViewMode('expanded')}
+                  title="展开卡片"
+                >
+                  <LayoutGrid className="h-3.5 w-3.5" />
+                  展开
+                </Button>
+                <Button
+                  size="sm"
+                  variant={viewMode === 'compact' ? 'secondary' : 'ghost'}
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setViewMode('compact')}
+                  title="缩略列表"
+                >
+                  <List className="h-3.5 w-3.5" />
+                  缩略
+                </Button>
               </div>
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2">
@@ -715,7 +743,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   验活中... {verifyProgress.current}/{verifyProgress.total}
                 </Button>
               )}
-              {data?.credentials && data.credentials.length > 0 && (
+              {sortedCredentials.length > 0 && (
                 <Button
                   onClick={handleQueryCurrentPageInfo}
                   size="sm"
@@ -755,9 +783,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 暂无凭据
               </CardContent>
             </Card>
+          ) : sortedCredentials.length === 0 ? (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                没有符合当前筛选的凭据
+              </CardContent>
+            </Card>
           ) : (
             <>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className={viewMode === 'compact' ? 'grid gap-2' : 'grid gap-4 md:grid-cols-2 lg:grid-cols-3'}>
                 {currentCredentials.map((credential) => (
                   <CredentialCard
                     key={credential.id}
@@ -768,6 +802,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onToggleSelect={() => toggleSelect(credential.id)}
                     balance={balanceMap.get(credential.id) || null}
                     loadingBalance={loadingBalanceIds.has(credential.id)}
+                    compact={viewMode === 'compact'}
                   />
                 ))}
               </div>
@@ -784,7 +819,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     上一页
                   </Button>
                   <span className="text-sm text-muted-foreground">
-                    第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
+                    第 {currentPage} / {totalPages} 页（共 {sortedCredentials.length} 个凭据）
                   </span>
                   <Button
                     variant="outline"
@@ -833,7 +868,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
         verifying={verifying}
         progress={verifyProgress}
         results={verifyResults}
-        onCancel={handleCancelVerify}
       />
     </div>
   )

@@ -5,10 +5,13 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  HeartPulse,
   KeyRound,
   Loader2,
-  RotateCcw,
+  ShieldCheck,
+  TimerReset,
   Trash2,
+  Undo2,
   Wallet,
   X,
 } from 'lucide-react'
@@ -39,7 +42,7 @@ import {
   useClearCredentialCooldown,
   useRecoverCredential,
 } from '@/hooks/use-credentials'
-import { cn } from '@/lib/utils'
+import { cn, extractErrorMessage } from '@/lib/utils'
 
 interface CredentialCardProps {
   credential: CredentialStatusItem
@@ -49,6 +52,7 @@ interface CredentialCardProps {
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  compact?: boolean
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -225,6 +229,7 @@ export function CredentialCard({
   onToggleSelect,
   balance,
   loadingBalance,
+  compact = false,
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
@@ -275,7 +280,7 @@ export function CredentialCard({
           toast.success(res.message)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('操作失败: ' + extractErrorMessage(err))
         },
       }
     )
@@ -295,7 +300,7 @@ export function CredentialCard({
           setEditingPriority(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('操作失败: ' + extractErrorMessage(err))
         },
       }
     )
@@ -306,7 +311,7 @@ export function CredentialCard({
       { id: credential.id, priority: nextPriority },
       {
         onSuccess: (res) => toast.success(res.message),
-        onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+        onError: (err) => toast.error('操作失败: ' + extractErrorMessage(err)),
       }
     )
   }
@@ -324,7 +329,7 @@ export function CredentialCard({
           setEditingRegion(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('操作失败: ' + extractErrorMessage(err))
         },
       }
     )
@@ -342,7 +347,7 @@ export function CredentialCard({
           setEditingEndpoint(false)
         },
         onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
+          toast.error('操作失败: ' + extractErrorMessage(err))
         },
       }
     )
@@ -354,7 +359,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('操作失败: ' + (err as Error).message)
+        toast.error('操作失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -365,7 +370,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('刷新失败: ' + (err as Error).message)
+        toast.error('刷新失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -376,7 +381,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('验活失败: ' + (err as Error).message)
+        toast.error('验活失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -387,7 +392,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('清除冷却失败: ' + (err as Error).message)
+        toast.error('清除冷却失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -400,7 +405,7 @@ export function CredentialCard({
           toast.success(res.message)
         },
         onError: (err) => {
-          toast.error('恢复失败: ' + (err as Error).message)
+          toast.error('恢复失败: ' + extractErrorMessage(err))
         },
       }
     )
@@ -419,7 +424,7 @@ export function CredentialCard({
         setShowDeleteDialog(false)
       },
       onError: (err) => {
-        toast.error('删除失败: ' + (err as Error).message)
+        toast.error('删除失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -528,119 +533,186 @@ export function CredentialCard({
           </div>
 
           <div className="space-y-2 border-t pt-3">
-            <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="shrink-0">指纹</span>
-              <span className="truncate rounded-md bg-muted px-2 py-1 font-mono">
-                {shortFingerprint}
-              </span>
-              {credential.refreshTokenHash && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7 shrink-0"
-                  title="复制凭据指纹"
-                  onClick={() => copyToClipboard(credential.refreshTokenHash!, '凭据指纹')}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </Button>
-              )}
-            </div>
+            {!compact && (
+              <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="shrink-0">指纹</span>
+                <span className="truncate rounded-md bg-muted px-2 py-1 font-mono">
+                  {shortFingerprint}
+                </span>
+                {credential.refreshTokenHash && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 shrink-0"
+                    title="复制凭据指纹"
+                    onClick={() => copyToClipboard(credential.refreshTokenHash!, '凭据指纹')}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
+            )}
 
-            <div className="grid grid-cols-9 gap-1">
-              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={handleViewBalance} title="刷新余额">
+            <div className={cn('grid gap-1.5', compact ? 'grid-cols-3 sm:grid-cols-6 xl:grid-cols-9' : 'grid-cols-3')}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
+                onClick={handleViewBalance}
+                title="刷新余额"
+                aria-label="刷新余额"
+              >
                 <Wallet className="h-4 w-4" />
+                <span>余额</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={handleForceRefresh}
                 disabled={forceRefreshToken.isPending}
                 title="刷新 Token"
+                aria-label="刷新 Token"
               >
-                <KeyRound className={cn('h-4 w-4', forceRefreshToken.isPending && 'animate-spin')} />
+                {forceRefreshToken.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <KeyRound className="h-4 w-4" />
+                )}
+                <span>Token</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={handleReset}
                 disabled={
                   resetFailure.isPending ||
                   (credential.failureCount === 0 && credential.refreshFailureCount === 0)
                 }
                 title="重置失败状态"
+                aria-label="重置失败状态"
               >
-                <RotateCcw className="h-4 w-4" />
+                <Undo2 className="h-4 w-4" />
+                <span>重置</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={handleSmokeCheck}
                 disabled={smokeCheckCredential.isPending}
                 title="重新验活"
+                aria-label="重新验活"
               >
-                <RotateCcw className={cn('h-4 w-4', smokeCheckCredential.isPending && 'animate-spin')} />
+                {smokeCheckCredential.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-4 w-4" />
+                )}
+                <span>验活</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={handleClearCooldown}
                 disabled={clearCooldown.isPending || !hasCooldown}
                 title="清除冷却"
+                aria-label="清除冷却"
               >
-                <RotateCcw className="h-4 w-4" />
+                {clearCooldown.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <TimerReset className="h-4 w-4" />
+                )}
+                <span>冷却</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={() => handleRecover(recoverableWithSmoke)}
                 disabled={
                   recoverCredential.isPending ||
                   (!recoverableWithoutSmoke && !recoverableWithSmoke)
                 }
                 title={recoverableWithSmoke ? '验活恢复' : '恢复凭据'}
+                aria-label={recoverableWithSmoke ? '验活恢复' : '恢复凭据'}
               >
-                <RotateCcw className={cn('h-4 w-4', recoverCredential.isPending && 'animate-spin')} />
+                {recoverCredential.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <HeartPulse className="h-4 w-4" />
+                )}
+                <span>恢复</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={() => handlePriorityStep(Math.max(0, credential.priority - 1))}
                 disabled={setPriority.isPending || credential.priority === 0}
                 title="提高优先级"
+                aria-label="提高优先级"
               >
                 <ChevronUp className="h-4 w-4" />
+                <span>优先+</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 px-2 text-xs"
                 onClick={() => handlePriorityStep(credential.priority + 1)}
                 disabled={setPriority.isPending}
                 title="降低优先级"
+                aria-label="降低优先级"
               >
                 <ChevronDown className="h-4 w-4" />
+                <span>优先-</span>
               </Button>
               <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 text-destructive hover:text-destructive"
+                size="sm"
+                variant="outline"
+                className="h-8 justify-start gap-1.5 border-destructive/30 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
                 onClick={() => setShowDeleteDialog(true)}
                 disabled={!credential.disabled}
                 title={!credential.disabled ? '需要先禁用凭据才能删除' : '删除凭据'}
+                aria-label={!credential.disabled ? '需要先禁用凭据才能删除' : '删除凭据'}
               >
                 <Trash2 className="h-4 w-4" />
+                <span>删除</span>
               </Button>
             </div>
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-4">
+        <CardContent className={compact ? 'border-t py-3' : 'space-y-4'}>
+          {compact ? (
+            <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <InfoRow label="优先级" value={credential.priority.toString()} />
+              <InfoRow
+                label="使用量"
+                value={hasUsage ? `${Math.round(safeUsagePercentage)}% / 剩余 ${formatQuota(remaining ?? 0)}` : '未知'}
+              />
+              <InfoRow
+                label="失败"
+                value={`${credential.failureCount}${credential.refreshFailureCount > 0 ? ` / 刷新 ${credential.refreshFailureCount}` : ''}`}
+                warn={credential.failureCount > 0 || credential.refreshFailureCount > 0}
+              />
+              <InfoRow label="最后调用" value={formatLastUsed(credential.lastUsedAt)} />
+              <InfoRow label="Region" value={credential.region || '全局默认'} />
+              <InfoRow label="Endpoint" value={credential.effectiveEndpoint} />
+              {retryAfter && <InfoRow label="重试" value={retryAfter} warn />}
+              {credential.lastErrorSummary && (
+                <div className="min-w-0 sm:col-span-2 lg:col-span-4">
+                  <div className="text-xs text-muted-foreground">最近错误</div>
+                  <div className="truncate text-sm font-medium">{credential.lastErrorSummary}</div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
           <div className="rounded-md border bg-muted/20 p-3">
             <div className="mb-2 flex items-center justify-between gap-3 text-sm">
               <span className="font-medium text-muted-foreground">使用量</span>
@@ -734,9 +806,28 @@ export function CredentialCard({
 
             <div className="space-y-1">
               <div className="text-xs font-medium uppercase text-muted-foreground">状态</div>
-              <InfoRow label="健康" value={credential.health.message} />
-              {retryAfter && <InfoRow label="重试" value={retryAfter} />}
-              {credential.disabledReason && <InfoRow label="禁用原因" value={credential.disabledReason} warn />}
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <span className="shrink-0 text-muted-foreground">健康</span>
+                <Badge variant={healthBadgeVariant(credential.health.status)} className="max-w-[11rem] truncate">
+                  {credential.health.message}
+                </Badge>
+              </div>
+              {retryAfter && (
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <span className="shrink-0 text-muted-foreground">重试</span>
+                  <Badge variant="outline" className="max-w-[11rem] truncate">
+                    {retryAfter}
+                  </Badge>
+                </div>
+              )}
+              {credential.disabledReason && (
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <span className="shrink-0 text-muted-foreground">禁用原因</span>
+                  <Badge variant="destructive" className="max-w-[11rem] truncate">
+                    {credential.disabledReason}
+                  </Badge>
+                </div>
+              )}
               {credential.lastErrorSummary && (
                 <div className="pt-1">
                   <div className="text-xs text-muted-foreground">最近错误</div>
@@ -814,6 +905,8 @@ export function CredentialCard({
                 ))}
               </div>
             </div>
+          )}
+            </>
           )}
         </CardContent>
       </Card>

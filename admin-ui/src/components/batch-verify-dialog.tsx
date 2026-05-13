@@ -20,7 +20,6 @@ interface BatchVerifyDialogProps {
   verifying: boolean
   progress: { current: number; total: number }
   results: Map<number, VerifyResult>
-  onCancel: () => void
 }
 
 export function BatchVerifyDialog({
@@ -29,7 +28,6 @@ export function BatchVerifyDialog({
   verifying,
   progress,
   results,
-  onCancel,
 }: BatchVerifyDialogProps) {
   const resultsArray = Array.from(results.values())
   const successCount = resultsArray.filter(r => r.status === 'success').length
@@ -114,29 +112,20 @@ export function BatchVerifyDialog({
           {/* 提示信息 */}
           {verifying && (
             <p className="text-xs text-muted-foreground">
-              💡 验活过程中每次请求间隔 2 秒，防止被封号。你可以关闭此窗口，验活会在后台继续进行。
+              服务端会按顺序验活选中的凭据，避免前端并发请求冲击上游账号。你可以关闭此窗口，验活会在后台继续进行。
             </p>
           )}
         </div>
 
         <div className="flex justify-end gap-2">
           {verifying ? (
-            <>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                后台运行
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                onClick={onCancel}
-              >
-                取消验活
-              </Button>
-            </>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              后台运行
+            </Button>
           ) : (
             <Button
               type="button"

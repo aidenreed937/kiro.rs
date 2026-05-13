@@ -7,12 +7,13 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, clear_credential_cooldown, delete_credential, force_refresh_token,
-        get_all_credentials, get_cached_balances, get_credential_balance, get_global_config,
-        get_proxy_config, import_token_json, import_token_json_from_path, recover_credential,
-        reset_failure_count, set_credential_disabled, set_credential_endpoint,
-        set_credential_priority, set_credential_region, smoke_check_credential,
-        update_global_config, update_proxy_config,
+        add_credential, batch_force_refresh_token, batch_refresh_balances,
+        batch_reset_failure_count, batch_smoke_check_credential, clear_credential_cooldown,
+        delete_credential, force_refresh_token, get_all_credentials, get_cached_balances,
+        get_credential_balance, get_global_config, get_proxy_config, import_token_json,
+        import_token_json_from_path, recover_credential, reset_failure_count,
+        set_credential_disabled, set_credential_endpoint, set_credential_priority,
+        set_credential_region, smoke_check_credential, update_global_config, update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -27,10 +28,15 @@ use super::{
 /// - `POST /credentials/:id/disabled` - 设置凭据禁用状态
 /// - `POST /credentials/:id/priority` - 设置凭据优先级
 /// - `POST /credentials/:id/reset` - 重置失败计数
+/// - `POST /credentials/reset` - 批量重置失败计数
 /// - `POST /credentials/:id/recover` - 恢复可恢复凭据状态
 /// - `POST /credentials/:id/smoke-check` - 发送最小消息验活
+/// - `POST /credentials/smoke-check` - 批量发送最小消息验活
 /// - `POST /credentials/:id/cooldown/clear` - 清除凭据冷却
+/// - `POST /credentials/:id/refresh` - 强制刷新凭据 Token
+/// - `POST /credentials/refresh` - 批量强制刷新凭据 Token
 /// - `GET /credentials/:id/balance` - 获取凭据余额
+/// - `POST /credentials/balances/refresh` - 批量刷新凭据余额
 /// - `GET /credentials/balances/cached` - 获取所有凭据的缓存余额
 ///
 /// # 认证
@@ -44,6 +50,16 @@ pub fn create_admin_router(state: AdminState) -> Router {
             get(get_all_credentials).post(add_credential),
         )
         .route("/credentials/balances/cached", get(get_cached_balances))
+        .route(
+            "/credentials/balances/refresh",
+            post(batch_refresh_balances),
+        )
+        .route("/credentials/reset", post(batch_reset_failure_count))
+        .route("/credentials/refresh", post(batch_force_refresh_token))
+        .route(
+            "/credentials/smoke-check",
+            post(batch_smoke_check_credential),
+        )
         .route("/credentials/import-token-json", post(import_token_json))
         .route(
             "/credentials/import-token-json/from-path",

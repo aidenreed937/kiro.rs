@@ -8,11 +8,15 @@ import {
   setCredentialRegion,
   setCredentialEndpoint,
   resetCredentialFailure,
+  batchResetCredentialFailure,
   smokeCheckCredential,
+  batchSmokeCheckCredentials,
   clearCredentialCooldown,
   recoverCredential,
   forceRefreshToken,
+  batchForceRefreshTokens,
   getCredentialBalance,
+  batchRefreshBalances,
   getCachedBalances,
   getCredentialAccountInfo,
   addCredential,
@@ -54,6 +58,17 @@ export function useForceRefreshToken() {
   })
 }
 
+export function useBatchForceRefreshTokens() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: number[]) => batchForceRefreshTokens(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+    },
+  })
+}
+
 // 查询凭据余额
 export function useCredentialBalance(id: number | null) {
   return useQuery({
@@ -61,6 +76,16 @@ export function useCredentialBalance(id: number | null) {
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
     retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+  })
+}
+
+export function useBatchRefreshBalances() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: number[]) => batchRefreshBalances(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+    },
   })
 }
 
@@ -157,10 +182,30 @@ export function useResetFailure() {
   })
 }
 
+export function useBatchResetFailure() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: number[]) => batchResetCredentialFailure(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
 export function useSmokeCheckCredential() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: number) => smokeCheckCredential(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useBatchSmokeCheckCredentials() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: number[]) => batchSmokeCheckCredentials(ids),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

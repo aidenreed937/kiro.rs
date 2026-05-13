@@ -532,6 +532,15 @@ impl AdminService {
             AdminServiceError::InvalidCredential(msg)
         } else if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
+        } else if msg.contains("需要先通过发消息验活") {
+            AdminServiceError::InvalidRequest(msg)
+        } else if msg.contains("error sending request")
+            || msg.contains("error trying to connect")
+            || msg.contains("connection")
+            || msg.contains("timeout")
+            || msg.contains("timed out")
+        {
+            AdminServiceError::UpstreamError(msg)
         } else {
             AdminServiceError::InternalError(msg)
         }
@@ -556,6 +565,7 @@ impl AdminService {
             msg.contains("Token 刷新失败") ||
             msg.contains("暂时不可用") ||
             // 网络错误（reqwest 错误）
+            msg.contains("error sending request") ||
             msg.contains("error trying to connect") ||
             msg.contains("connection") ||
             msg.contains("timeout") ||
@@ -591,6 +601,7 @@ impl AdminService {
         if is_invalid_credential {
             AdminServiceError::InvalidCredential(msg)
         } else if msg.contains("error trying to connect")
+            || msg.contains("error sending request")
             || msg.contains("connection")
             || msg.contains("timeout")
         {
